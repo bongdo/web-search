@@ -1,0 +1,64 @@
+{
+    "settings": {
+        "title": "Web Search",
+        "description": "Search engines, bookmarks and shortcuts for the launcher. Engine modifiers and aliases work in the global search.",
+        "engine": {
+            "label": "Default Search Engine",
+            "description": "Used for plain queries and the fallback search row"
+        },
+        "directUrl": {
+            "label": "Direct URL Opening",
+            "description": "Open URLs directly in the browser instead of searching for them"
+        },
+        "suggestions": {
+            "label": "Show Search Suggestions",
+            "description": "Fetch real-time suggestions while typing"
+        },
+        "favicons": {
+            "label": "Website Icons",
+            "description": "Fetch site favicons from Google (adds a small WEB badge)"
+        },
+        "maxResults": {
+            "label": "Maximum Results",
+            "description": "Limit the number of results shown for a query"
+        },
+        "shortcuts": {
+            "label": "Shortcuts",
+            "description": "Type an alias to open the page instantly. Example: ma -> Yandex Market, yh -> YouTube history.",
+            "add": "Add Shortcut",
+            "alias": "Alias",
+            "name": "Name",
+            "url": "URL"
+        },
+        "bookmarks": {
+            "label": "Bookmarks",
+            "description": "Priority pages. A matching bookmark is promoted above web search results.",
+            "add": "Add Bookmark",
+            "title": "Title",
+            "url": "URL"
+        },
+        "engines": {
+            "label": "Custom Search Engines",
+            "description": "Custom engine modifiers. Type the key, a space, then the query. Example: gh noctalia.",
+            "add": "Add Engine",
+            "key": "Key",
+            "name": "Name",
+            "url": "Search URL prefix",
+            "domain": "Domain filter",
+            "suggest": "Suggest URL (optional)"
+        }
+    },
+    "launcher": {
+        "typeSomething": "Type Something...",
+        "searchInternet": "Search internet from {engine}",
+        "search": "Search \"{query}\"",
+        "openIn": "Open in {engine}",
+        "openUrl": "Open {url}",
+        "openUrlDescription": "Open URL directly in browser",
+        "suggestion": "Suggestion from {engine}",
+        "command": {
+            "name": "Web Search",
+            "description": "Search something from the internet"
+        }
+    }
+}
