@@ -25,6 +25,9 @@
     "openUrl": "{url} öffnen",
     "openUrlDescription": "URL direkt im Browser öffnen",
     "suggestion": "Vorschlag von {engine}",
+    "bookmarkAdd": "{url} als Lesezeichen",
+    "bookmarkAdded": "Lesezeichen hinzugefügt",
+    "bookmarkExists": "Bereits als Lesezeichen",
     "command": {
       "description": "Im Internet nach etwas suchen"
     }

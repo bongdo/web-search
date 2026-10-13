@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell.Io
 import qs.Commons
+import qs.Services.UI
 import "lib.js" as Lib
 
 Item {
@@ -19,7 +20,13 @@ Item {
     property var engines: ({})
     property var bookmarks: []
     property var shortcuts: []
+    // `history` is the merged view used by search: pages the launcher recorded
+    // (selfHistory, in settings.json) plus the Zen import (importedHistory,
+    // from the tool-owned history.json).
+    property var selfHistory: []
+    property var importedHistory: []
     property var history: []
+    property bool syncingHistory: false
     property string defaultEngineKey: "ddg"
     property bool directUrl: true
     property bool showSuggestions: true
@@ -56,7 +63,8 @@ Item {
         engines = Lib.allEngines(cfgValue("engines", []));
         bookmarks = cfgValue("bookmarks", []);
         shortcuts = cfgValue("shortcuts", []);
-        history = cfgValue("history", []);
+        selfHistory = cfgValue("history", []);
+        rebuildHistory();
         defaultEngineKey = cfgValue("search_engine", "ddg");
         directUrl = cfgValue("direct_url", true);
         showSuggestions = cfgValue("show_suggestions", true);
@@ -68,6 +76,63 @@ Item {
             faviconSeeded = true;
             faviconList.running = true;
         }
+        // Show the last import immediately, then top it up with a fresh diff.
+        refreshImportedHistory();
+        startHistorySync();
+    }
+
+    function historyFile() {
+        return pluginApi ? pluginApi.pluginDir + "/history.json" : "";
+    }
+
+    function historyScript() {
+        return pluginApi ? pluginApi.pluginDir + "/tools/import-history.js" : "";
+    }
+
+    // Merge self-recorded and imported history into one newest-first list.
+    function rebuildHistory() {
+        var byUrl = ({});
+        var lists = [selfHistory, importedHistory];
+        for (var i = 0; i < lists.length; i++) {
+            for (var j = 0; j < lists[i].length; j++) {
+                var e = lists[i][j];
+                if (!e || !e.url) {
+                    continue;
+                }
+                var ts = e.ts || 0;
+                var prev = byUrl[e.url];
+                if (!prev || ts > (prev.ts || 0)) {
+                    byUrl[e.url] = { "title": e.title || e.url, "url": e.url, "ts": ts };
+                }
+            }
+        }
+        var out = [];
+        for (var url in byUrl) {
+            out.push(byUrl[url]);
+        }
+        out.sort(function (a, b) { return (b.ts || 0) - (a.ts || 0); });
+        history = out;
+    }
+
+    function refreshImportedHistory() {
+        if (pluginApi) {
+            importedReader.running = true;
+        }
+    }
+
+    // The tool is incremental, so a diff is cheap enough to run on every open.
+    // node is not on the shell's PATH; probe the usual spots, then PATH.
+    function startHistorySync() {
+        if (!pluginApi || syncingHistory) {
+            return;
+        }
+        syncingHistory = true;
+        historySync.running = true;
+    }
+
+    function syncCommand() {
+        return "n=\"$HOME/.local/bin/node\"; [ -x \"$n\" ] || n=\"$HOME/.hermes/node/bin/node\"; "
+            + "[ -x \"$n\" ] || n=node; exec \"$n\" '" + historyScript() + "' >/dev/null 2>&1";
     }
 
     function handleCommand(searchText) {
@@ -93,11 +158,13 @@ Item {
         var engine = parsed.modifier && parsed.modifier.type === "engine"
             ? parsed.modifier.engine
             : (engines[defaultEngineKey] || Lib.BUILTIN_ENGINES.g);
-        return { engine: engine, query: parsed.query };
+        var action = parsed.modifier && parsed.modifier.type === "action" ? parsed.modifier.action : null;
+        return { engine: engine, query: parsed.query, action: action };
     }
 
     function iconFor(kind) {
         if (kind === "url") return "link";
+        if (kind === "bookmark-add") return "bookmark";
         if (kind === "bookmark") return "bookmark";
         if (kind === "shortcut") return "bolt";
         if (kind === "history") return "history";
@@ -170,7 +237,9 @@ Item {
         var domain = item.faviconDomain || "";
         var withIcon = domain !== "" && favicons;
         return {
-            "name": item.name,
+            "name": item.kind === "bookmark-add"
+                ? pluginApi?.tr("launcher.bookmarkAdd", { "url": item.url })
+                : item.name,
             "description": subtitle(item.description),
             // Icon shown when the image cannot be loaded at all (and while it
             // loads, if imagePath is empty). With favicons on, keep a neutral
@@ -183,7 +252,11 @@ Item {
             "usageKey": item.url,
             "provider": root,
             "onActivate": function () {
-                openUrl(item.url, item.name, item.kind);
+                if (item.kind === "bookmark-add") {
+                    addBookmark(item.url);
+                } else {
+                    openUrl(item.url, item.name, item.kind);
+                }
             }
         };
     }
@@ -216,7 +289,11 @@ Item {
             maxResults: maxResults
         });
 
-        maybeFetchSuggestions(ctx, searchText);
+        if (ctx.action) {
+            suggestions = [];
+        } else {
+            maybeFetchSuggestions(ctx, searchText);
+        }
 
         var results = items.map(toEntry);
         for (var i = 0; i < suggestions.length; i++) {
@@ -311,7 +388,97 @@ Item {
         }
         pluginApi.pluginSettings.history = list;
         pluginApi.saveSettings();
-        history = list;
+        selfHistory = list;
+        rebuildHistory();
+    }
+
+    // `bookmark <url>`: title comes from history/bookmarks if the page is
+    // already known, otherwise from the page's <title> (network), else the URL.
+    function toast(summary, body) {
+        if (typeof ToastService !== "undefined") {
+            ToastService.showNotice(summary, body, "bookmark");
+        }
+    }
+
+    function knownTitle(url) {
+        var lists = [bookmarks, history];
+        for (var i = 0; i < lists.length; i++) {
+            for (var j = 0; j < lists[i].length; j++) {
+                if (lists[i][j].url === url && lists[i][j].title) {
+                    return lists[i][j].title;
+                }
+            }
+        }
+        return "";
+    }
+
+    function addBookmark(url) {
+        if (!pluginApi || !url) {
+            return;
+        }
+        var list = pluginApi.pluginSettings.bookmarks || [];
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].url === url) {
+                if (launcher) {
+                    launcher.close();
+                }
+                toast(pluginApi.tr("launcher.bookmarkExists"), url);
+                return;
+            }
+        }
+        var title = knownTitle(url) || url;
+        var fresh = list.slice();
+        fresh.unshift({ "title": title, "url": url, "visits": 0 });
+        pluginApi.pluginSettings.bookmarks = fresh;
+        bookmarks = fresh;
+        pluginApi.saveSettings();
+        if (launcher) {
+            launcher.close();
+        }
+        toast(pluginApi.tr("launcher.bookmarkAdded"), title);
+        if (title === url) {
+            fetchTitle(url, function (fetched) {
+                updateBookmarkTitle(url, fetched);
+            });
+        }
+    }
+
+    function updateBookmarkTitle(url, title) {
+        if (!title || !pluginApi) {
+            return;
+        }
+        var list = pluginApi.pluginSettings.bookmarks || [];
+        var changed = false;
+        for (var i = 0; i < list.length; i++) {
+            if (list[i].url === url && list[i].title === url) {
+                list[i].title = title;
+                changed = true;
+            }
+        }
+        if (changed) {
+            bookmarks = list;
+            pluginApi.saveSettings();
+        }
+    }
+
+    function parseTitle(html) {
+        var m = /<title[^>]*>([\s\S]*?)<\/title>/i.exec(html || "");
+        if (!m) {
+            return "";
+        }
+        return m[1]
+            .replace(/\s+/g, " ")
+            .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+            .replace(/&quot;/g, "\"").replace(/&#39;/g, "'")
+            .replace(/^\s+|\s+$/g, "")
+            .slice(0, 300);
+    }
+
+    function fetchTitle(url, callback) {
+        var proc = titleFetcher.createObject(root, { "url": url, "callback": callback });
+        if (proc) {
+            proc.running = true;
+        }
     }
 
     // Populates the in-memory cache from the on-disk favicon cache.
@@ -322,6 +489,41 @@ Item {
             id: faviconListStdout
         }
         onExited: root.seedFaviconCache(String(faviconListStdout.text || ""))
+    }
+
+    // Reads the tool-owned Zen history import (history.json) and merges it in.
+    Process {
+        id: importedReader
+        command: ["sh", "-c", "cat '" + root.historyFile() + "' 2>/dev/null"]
+        stdout: StdioCollector {
+            id: importedReaderStdout
+        }
+        onExited: {
+            var items = [];
+            try {
+                var data = JSON.parse(String(importedReaderStdout.text || ""));
+                if (data && Array.isArray(data.items)) {
+                    items = data.items;
+                }
+            } catch (e) {
+                // No import yet, or a partial write: keep the current view.
+            }
+            root.importedHistory = items;
+            root.rebuildHistory();
+            if (root.launcher) {
+                root.launcher.updateResults();
+            }
+        }
+    }
+
+    // Runs the incremental import tool; on exit the fresh history.json is read.
+    Process {
+        id: historySync
+        command: ["sh", "-c", root.syncCommand()]
+        onExited: {
+            root.syncingHistory = false;
+            root.refreshImportedHistory();
+        }
     }
 
     // One-shot downloader: reuses the cached file if present, otherwise curls
@@ -343,6 +545,27 @@ Item {
                     root.faviconFailed[domain] = true;
                 }
                 root.faviconPending[domain] = false;
+                destroy();
+            }
+        }
+    }
+
+    // One-shot page-title fetcher used when adding a bookmark for an unknown
+    // URL. Raw HTML is parsed in JS so the URL never touches a shell.
+    Component {
+        id: titleFetcher
+
+        Process {
+            property string url
+            property var callback
+            command: ["curl", "-fsSL", "--max-time", "8", "-A", "Mozilla/5.0", url]
+            stdout: StdioCollector {
+                id: titleStdout
+            }
+            onExited: (code) => {
+                if (callback) {
+                    callback(code === 0 ? root.parseTitle(String(titleStdout.text || "")) : "");
+                }
                 destroy();
             }
         }

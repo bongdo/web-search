@@ -32,7 +32,7 @@
         },
         "bookmarks": {
             "label": "Bookmarks",
-            "description": "Priority pages. A matching bookmark is promoted above web search results.",
+            "description": "Priority pages. A matching bookmark is promoted above web search results. Type bookmark <url> in the launcher to add one.",
             "add": "Add Bookmark",
             "title": "Title",
             "url": "URL"
@@ -56,6 +56,9 @@
         "openUrl": "Open {url}",
         "openUrlDescription": "Open URL directly in browser",
         "suggestion": "Suggestion from {engine}",
+        "bookmarkAdd": "Bookmark {url}",
+        "bookmarkAdded": "Bookmark added",
+        "bookmarkExists": "Already bookmarked",
         "command": {
             "name": "Web Search",
             "description": "Search something from the internet"

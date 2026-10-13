@@ -157,4 +157,29 @@ check("maxResults caps output", () => {
   assert.ok(r.length <= 2);
 });
 
+check("bookmark action parses as an action modifier", () => {
+  const p = L.parseQuery("bookmark https://example.com", engines);
+  assert.strictEqual(p.modifier.type, "action");
+  assert.strictEqual(p.modifier.action, "bookmark");
+  assert.strictEqual(p.query, "https://example.com");
+});
+
+check("bookmark action returns a single add row for a URL", () => {
+  const r = run("bookmark example.com");
+  assert.strictEqual(r.length, 1);
+  assert.strictEqual(r[0].kind, "bookmark-add");
+  assert.strictEqual(r[0].url, "https://example.com");
+  assert.strictEqual(r[0].score, L.SCORE.bookmarkAction);
+});
+
+check("bookmark action strips surrounding quotes", () => {
+  assert.strictEqual(run('bookmark "https://example.com"')[0].url, "https://example.com");
+});
+
+check("bookmark with a non-URL falls through to a normal query", () => {
+  const r = run("bookmark manager");
+  assert.ok(!r.some((x) => x.kind === "bookmark-add"));
+  assert.ok(r.some((x) => x.kind === "search"));
+});
+
 console.log("\n" + passed + " checks passed" + (process.exitCode ? ", some failed" : ""));

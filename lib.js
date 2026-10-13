@@ -13,11 +13,16 @@ var BUILTIN_ENGINES = {
 // Subset modifiers: restrict the pool to one kind of user data.
 var SUBSETS = { h: "history", b: "bookmarks", sh: "shortcuts" };
 
+// Action modifiers: full words that trigger a side effect on activation.
+var ACTIONS = { bookmark: "bookmark" };
+
 // Scores live on the launcher's normalized 0..1 scale, which is what built-in
 // providers use (FuzzySort normalizes app matches to 0..1). Values > 1 always
 // win over applications; fuzzy web matches stay below strong apps; the fallback
 // search row is negative so it sits under everything else.
 var SCORE = {
+    // A `bookmark <url>` action outranks everything: it is an explicit command.
+    bookmarkAction: 2.5,
     engineSearch: 2.0,
     directUrl: 2.0,
     urlTyped: 1.5,
@@ -91,6 +96,9 @@ function parseQuery(text, engines) {
         }
         if (SUBSETS[key]) {
             return { modifier: { key: key, type: "subset", subset: SUBSETS[key] }, query: rest };
+        }
+        if (ACTIONS[key]) {
+            return { modifier: { key: key, type: "action", action: ACTIONS[key] }, query: rest };
         }
     }
     return { modifier: null, query: raw.replace(/\s+$/, "") };
@@ -248,6 +256,26 @@ function getResults(opts) {
         return [];
     }
 
+    // `bookmark <url>` is an action: the row is committed by the QML layer on
+    // activation (nothing is written while the user is still typing).
+    if (modifier && modifier.type === "action" && modifier.action === "bookmark") {
+        var target = query.replace(/^["']+|["']+$/g, "");
+        if (isUrl(target)) {
+            var bookmarkUrl = normalizeUrl(target);
+            return [{
+                kind: "bookmark-add",
+                id: "bookmark-add:" + bookmarkUrl,
+                name: bookmarkUrl,
+                description: bookmarkUrl,
+                url: bookmarkUrl,
+                faviconDomain: hostOf(bookmarkUrl),
+                score: SCORE.bookmarkAction
+            }];
+        }
+        // Not a URL: treat the remainder as an ordinary query.
+        modifier = null;
+    }
+
     var out = [];
 
     if (opts.directUrl && query !== "" && isUrl(query)) {
@@ -366,6 +394,7 @@ if (typeof module !== "undefined" && module.exports) {
     module.exports = {
         BUILTIN_ENGINES: BUILTIN_ENGINES,
         SUBSETS: SUBSETS,
+        ACTIONS: ACTIONS,
         SCORE: SCORE,
         enginesFromSettings: enginesFromSettings,
         allEngines: allEngines,

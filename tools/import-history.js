@@ -1,15 +1,13 @@
 #!/usr/bin/env node
-// Import browser history into the web-search plugin's launcher history.
+// Incremental import of Zen browser history into the web-search plugin.
 //
-// Sources (Zen profile):
-//   places.sqlite       visited pages (latest visit per URL, visible http(s))
-//   formhistory.sqlite  typed search queries -> a search URL on the configured
-//                       engine, so selecting one re-runs the search
+// State file (owned by this tool): <plugin>/history.json
+//   { version, pageWatermark, searchWatermark, items:[{title,url,ts}] }
 //
-// Target: settings.json -> `history` [{title,url,ts}]
-// Re-runnable: entries are rebuilt from the DBs, deduped by URL keeping the
-// newest `ts`, then merged with the existing history (so plugin-recorded
-// entries survive). Newest first.
+// Each run reads only rows newer than the stored watermark (a PRTime in µs,
+// monotonic), merges them into the item list, and writes the state back. The
+// plugin reads this file and merges it with its own settings.history, so the
+// two writers never touch the same file (no lost updates).
 
 const fs = require("fs");
 const os = require("os");
@@ -19,12 +17,19 @@ const Lib = require(path.join(__dirname, "..", "lib.js"));
 
 const HOME = os.homedir();
 const PLUGIN = path.join(HOME, ".config/noctalia/plugins/web-search");
-const ZEN = path.join(HOME, ".zen/eeujjh69.Default Profile");
-const PLACES = path.join(ZEN, "places.sqlite");
-const FORMHISTORY = path.join(ZEN, "formhistory.sqlite");
+const STATE_FILE = path.join(PLUGIN, "history.json");
+const SETTINGS_FILE = path.join(PLUGIN, "settings.json");
 
-const PAGE_LIMIT = 1000; // newest visited pages imported from the browser
 const TOTAL_LIMIT = 5000; // keep in sync with the cap in LauncherProvider.qml
+const PAGE_LIMIT = 5000; // newest rows considered in a single run
+
+function readJson(file, fallback) {
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch {
+    return fallback;
+  }
+}
 
 function query(db, sql) {
   if (!fs.existsSync(db)) return [];
@@ -39,38 +44,66 @@ function httpUrl(value) {
   return typeof value === "string" && /^https?:\/\//i.test(value.trim());
 }
 
-function pages() {
+// Newest Zen profile that has a places.sqlite (falls back to the legacy path).
+function zenProfile() {
+  const root = path.join(HOME, ".zen");
+  let best = "";
+  let bestMtime = -1;
+  try {
+    for (const name of fs.readdirSync(root)) {
+      const db = path.join(root, name, "places.sqlite");
+      if (fs.existsSync(db) && fs.statSync(db).mtimeMs > bestMtime) {
+        bestMtime = fs.statSync(db).mtimeMs;
+        best = path.join(root, name);
+      }
+    }
+  } catch {}
+  return best || path.join(root, "eeujjh69.Default Profile");
+}
+
+// Rows newer than `wm`; the returned watermark is the DB-wide max, so the next
+// run starts exactly where this snapshot ended.
+function pages(places, wm) {
+  if (!fs.existsSync(places)) return { items: [], watermark: wm };
   const rows = query(
-    PLACES,
+    places,
     `SELECT p.url AS url,
             COALESCE(NULLIF(p.title,''), p.url) AS title,
             CAST(MAX(h.visit_date) / 1000 AS INTEGER) AS ts
      FROM moz_historyvisits h JOIN moz_places p ON p.id = h.place_id
-     WHERE p.hidden = 0 AND p.url LIKE 'http%'
+     WHERE p.hidden = 0 AND p.url LIKE 'http%' AND h.visit_date > ${wm}
      GROUP BY p.id
-     ORDER BY ts DESC`
+     ORDER BY ts DESC
+     LIMIT ${PAGE_LIMIT}`
   );
-  return rows
+  const maxRow = query(places, `SELECT COALESCE(MAX(visit_date), 0) AS wm FROM moz_historyvisits`);
+  const items = rows
     .filter((r) => httpUrl(r.url))
     .map((r) => ({ title: (r.title || r.url).trim(), url: r.url.trim(), ts: Number(r.ts) || 0 }));
+  return { items, watermark: Number(maxRow[0] && maxRow[0].wm) || wm };
 }
 
-function searches(engineUrl) {
+// Typed searches become a search URL on the configured engine, so selecting one
+// re-runs the search.
+function searches(formhistory, engineUrl, wm) {
+  if (!fs.existsSync(formhistory)) return { items: [], watermark: wm };
   const rows = query(
-    FORMHISTORY,
+    formhistory,
     `SELECT value AS query, CAST(MAX(lastUsed) / 1000 AS INTEGER) AS ts
      FROM moz_formhistory
      WHERE fieldname IN ('searchbar-history','search-query-input')
-       AND value IS NOT NULL AND trim(value) <> ''
+       AND value IS NOT NULL AND trim(value) <> '' AND lastUsed > ${wm}
      GROUP BY value
      ORDER BY ts DESC`
   );
-  return rows
+  const maxRow = query(formhistory, `SELECT COALESCE(MAX(lastUsed), 0) AS wm FROM moz_formhistory`);
+  const items = rows
     .filter((r) => r.query)
     .map((r) => {
       const q = String(r.query).trim();
       return { title: q, url: engineUrl + encodeURIComponent(q), ts: Number(r.ts) || 0 };
     });
+  return { items, watermark: Number(maxRow[0] && maxRow[0].wm) || wm };
 }
 
 // Dedup by URL (newest ts wins), newest first, capped.
@@ -97,20 +130,43 @@ function engineSearchUrl(settings) {
 }
 
 function main() {
-  const file = path.join(PLUGIN, "settings.json");
-  const settings = JSON.parse(fs.readFileSync(file, "utf8"));
-  const existing = Array.isArray(settings.history) ? settings.history : [];
+  const firstRun = !fs.existsSync(STATE_FILE);
+  const state = readJson(STATE_FILE, { version: 1, pageWatermark: 0, searchWatermark: 0, items: [] });
+  const settings = readJson(SETTINGS_FILE, {});
 
-  // All typed searches (few) + the newest pages; merge caps the total.
-  const incoming = [...pages().slice(0, PAGE_LIMIT), ...searches(engineSearchUrl(settings))];
-  const history = mergeHistory(existing, incoming, TOTAL_LIMIT);
+  // First run: seed from any history the plugin already recorded, so nothing is
+  // lost (the plugin then merges both sources, deduped by URL).
+  const seed = firstRun && Array.isArray(settings.history) ? settings.history : [];
+  const existing = mergeHistory(seed, state.items || [], TOTAL_LIMIT);
 
-  settings.history = history;
-  fs.writeFileSync(file, JSON.stringify(settings, null, 2) + "\n");
+  const profile = zenProfile();
+  const p = pages(path.join(profile, "places.sqlite"), Number(state.pageWatermark) || 0);
+  const s = searches(
+    path.join(profile, "formhistory.sqlite"),
+    engineSearchUrl(settings),
+    Number(state.searchWatermark) || 0
+  );
+
+  const items = mergeHistory(existing, [...p.items, ...s.items], TOTAL_LIMIT);
+  const next = {
+    version: 1,
+    pageWatermark: p.watermark,
+    searchWatermark: s.watermark,
+    items,
+  };
+
+  fs.mkdirSync(PLUGIN, { recursive: true });
+  // Atomic write: the plugin may read this file concurrently.
+  const tmp = STATE_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify(next, null, 2) + "\n");
+  fs.renameSync(tmp, STATE_FILE);
   console.log(
-    `imported -> ${file}\n` + `  from browser: ${incoming.length}\n` + `  total:        ${history.length}`
+    `synced -> ${STATE_FILE}\n` +
+      `  profile: ${profile}\n` +
+      `  new:     ${p.items.length + s.items.length}\n` +
+      `  total:   ${items.length}`
   );
 }
 
 if (require.main === module) main();
-module.exports = { pages, searches, mergeHistory, engineSearchUrl };
+module.exports = { pages, searches, mergeHistory, engineSearchUrl, zenProfile };

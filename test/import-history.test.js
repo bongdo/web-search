@@ -1,6 +1,6 @@
 // Minimal assert-based checks for tools/import-history.js. Run: node test/import-history.test.js
 const assert = require("assert");
-const { mergeHistory } = require("../tools/import-history.js");
+const { mergeHistory, pages } = require("../tools/import-history.js");
 
 let passed = 0;
 function check(name, fn) {
@@ -38,6 +38,10 @@ check("caps to totalLimit keeping newest", () => {
     1
   );
   assert.deepStrictEqual(capped.map((x) => x.url), ["b"]);
+});
+
+check("pages keeps the watermark when the db is missing", () => {
+  assert.deepStrictEqual(pages("/nonexistent/places.sqlite", 42), { items: [], watermark: 42 });
 });
 
 console.log(`\n${passed} checks passed`);

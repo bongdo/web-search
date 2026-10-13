@@ -25,6 +25,9 @@
         "openUrl": "Ouvrir {url}",
         "openUrlDescription": "Ouvrir l'URL directement dans le navigateur",
         "suggestion": "Suggestion de {engine}",
+        "bookmarkAdd": "Marquer {url}",
+        "bookmarkAdded": "Favori ajouté",
+        "bookmarkExists": "Déjà en favori",
         "command": {
             "description": "Rechercher quelque chose sur Internet"
         }

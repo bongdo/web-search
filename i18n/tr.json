@@ -25,6 +25,9 @@
         "openUrl": "{url} aç",
         "openUrlDescription": "URLi direkt tarayıcıda aç",
         "suggestion": "{engine} tarafından öneri",
+        "bookmarkAdd": "{url} yer imi ekle",
+        "bookmarkAdded": "Yer imi eklendi",
+        "bookmarkExists": "Zaten yer iminde",
         "command": {
             "description": "İnternetten bir şeyler ara"
         }
