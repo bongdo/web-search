@@ -1,13 +1,13 @@
 #!/usr/bin/env node
-// One-time (re-runnable) migration: ww config + Zen bookmarks -> plugin settings.json
+// One-time (re-runnable) migration: ww config -> plugin settings.json
 //
 // Sources:
 //   ~/.config/ww/shortcuts.json   [{alias,name,url}]
 //   ~/.config/ww/engines.json     {key:{name,url,domain}}
 //   ~/.config/ww/bookmarks.json   [{title,url,visits}]
-//   <zen profile>/places.sqlite   moz_bookmarks (type=1)
 //
 // Target: <data-dir>/settings.json (default ~/.config/noctalia/plugins/web-search)
+// Zen bookmarks are imported at runtime by tools/import-history.js, not here.
 // Idempotent and non-destructive: bookmark/engine/shortcut entries already in
 // settings.json win over imported ones, and all other settings keys are kept.
 //
@@ -16,7 +16,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { resolveDataDir, zenProfile, bookmarks: zenBookmarks } = require("./import-history.js");
+const { resolveDataDir } = require("./import-history.js");
 
 const HOME = os.homedir();
 const WW = path.join(HOME, ".config/ww");
@@ -44,19 +44,17 @@ function httpUrl(value) {
   return typeof value === "string" && /^https?:\/\//i.test(value.trim());
 }
 
-function loadZenBookmarks() {
-  const profile = zenProfile(HOME);
-  if (!profile) return [];
-  return zenBookmarks(path.join(profile, "places.sqlite")) || [];
-}
-
+// Existing entries keep any URL scheme the plugin can open. Newly imported ww
+// bookmarks are restricted to http(s), matching the old migration behavior.
 // Existing entries are passed first, so their non-empty title wins; visits are
 // the max seen anywhere.
 function mergeBookmarks(existing, incoming) {
   const byUrl = new Map();
-  for (const e of [...existing, ...incoming]) {
-    if (!e || !httpUrl(e.url)) continue;
+  const add = (e, requireHttp) => {
+    if (!e || !e.url) return;
+    if (requireHttp && !httpUrl(e.url)) return;
     const url = e.url.trim();
+    if (!url) return;
     const title = typeof e.title === "string" ? e.title.trim() : "";
     const visits = Number(e.visits) || 0;
     const prev = byUrl.get(url);
@@ -66,14 +64,17 @@ function mergeBookmarks(existing, incoming) {
       prev.visits = Math.max(prev.visits, visits);
       if (!prev.title) prev.title = title;
     }
-  }
+  };
+  for (const e of existing) add(e, false);
+  for (const e of incoming) add(e, true);
   return [...byUrl.values()]
     .map((b) => ({ title: b.title || b.url, url: b.url, visits: b.visits }))
     .sort((a, b) => b.visits - a.visits || a.title.localeCompare(b.title));
 }
 
 function loadShortcuts() {
-  const src = readJson(path.join(WW, "shortcuts.json"), []);
+  const raw = readJson(path.join(WW, "shortcuts.json"), []);
+  const src = Array.isArray(raw) ? raw : [];
   const seen = new Set();
   const out = [];
   for (const s of src) {
@@ -87,7 +88,8 @@ function loadShortcuts() {
 }
 
 function loadEngines() {
-  const src = readJson(path.join(WW, "engines.json"), {});
+  const raw = readJson(path.join(WW, "engines.json"), {});
+  const src = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
   const out = [];
   for (const [key, eng] of Object.entries(src)) {
     if (!eng || !key || !eng.url) continue;
@@ -114,12 +116,30 @@ function mergeBy(existing, imported, key) {
 }
 
 function main() {
-  const settings = readJson(SETTINGS_FILE, {});
-  const wwBookmarks = readJson(path.join(WW, "bookmarks.json"), []);
+  let settings = {};
+  if (fs.existsSync(SETTINGS_FILE)) {
+    try {
+      settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
+      if (!settings || typeof settings !== "object" || Array.isArray(settings)) {
+        throw new Error("settings.json is not a JSON object");
+      }
+    } catch (err) {
+      const backup = `${SETTINGS_FILE}.corrupt.${Date.now()}`;
+      try {
+        fs.copyFileSync(SETTINGS_FILE, backup);
+        console.error(`migrate: settings.json is invalid; backed up to ${backup}`);
+      } catch (copyErr) {
+        console.error(`migrate: settings.json is invalid and could not be backed up: ${copyErr.message}`);
+      }
+      settings = {};
+    }
+  }
+  const rawWwBookmarks = readJson(path.join(WW, "bookmarks.json"), []);
+  const wwBookmarks = Array.isArray(rawWwBookmarks) ? rawWwBookmarks : [];
 
   settings.bookmarks = mergeBookmarks(
     Array.isArray(settings.bookmarks) ? settings.bookmarks : [],
-    [...wwBookmarks, ...loadZenBookmarks()]
+    wwBookmarks
   );
   settings.shortcuts = mergeBy(
     Array.isArray(settings.shortcuts) ? settings.shortcuts : [],

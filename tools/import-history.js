@@ -76,7 +76,13 @@ function snapshotDb(db) {
       for (const file of snapshots.values()) {
         fs.rmSync(path.dirname(file), { recursive: true, force: true });
       }
+      snapshots.clear();
     });
+    // Node normally skips the exit event on signals; the QML watchdog stops a
+    // hung sync with SIGTERM, so turn signals into a normal exit to clean /tmp.
+    for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143], ["SIGHUP", 129]]) {
+      process.once(signal, () => process.exit(code));
+    }
   }
   return copy;
 }
@@ -160,27 +166,33 @@ function dbSignature(places) {
     .join("|");
 }
 
-// Rows at/after `wm`; the returned watermark is the DB-wide max, so the next
-// run starts exactly where this snapshot ended. A row exactly on the watermark
-// is re-read once; mergeHistory dedups it by URL.
+// Rows at/after `wm`. The rows and the DB-wide max come from one SQL statement
+// (one snapshot), so a write between two queries cannot skip a row.
 function pages(places, wm) {
   if (!fs.existsSync(places)) return { items: [], watermark: wm };
   const rows = query(
     places,
-    `SELECT p.url AS url,
-            COALESCE(NULLIF(p.title,''), p.url) AS title,
-            CAST(MAX(h.visit_date) / 1000 AS INTEGER) AS ts
-     FROM moz_historyvisits h JOIN moz_places p ON p.id = h.place_id
-     WHERE p.hidden = 0 AND p.url LIKE 'http%' AND h.visit_date >= ${wm}
-     GROUP BY p.id
-     ORDER BY ts DESC
-     LIMIT ${PAGE_LIMIT}`
+    `WITH maxv AS (SELECT COALESCE(MAX(visit_date), 0) AS wm FROM moz_historyvisits),
+     page_rows AS (
+       SELECT p.url AS url,
+              COALESCE(NULLIF(p.title,''), p.url) AS title,
+              CAST(MAX(h.visit_date) / 1000 AS INTEGER) AS ts
+       FROM moz_historyvisits h JOIN moz_places p ON p.id = h.place_id
+       WHERE p.hidden = 0 AND p.url LIKE 'http%' AND h.visit_date >= ${wm}
+       GROUP BY p.id
+       ORDER BY ts DESC
+       LIMIT ${PAGE_LIMIT}
+     )
+     SELECT url, title, ts, (SELECT wm FROM maxv) AS db_wm FROM page_rows
+     UNION ALL
+     SELECT NULL, NULL, NULL, (SELECT wm FROM maxv)
+     WHERE NOT EXISTS (SELECT 1 FROM page_rows)`
   );
-  const maxRow = query(places, `SELECT COALESCE(MAX(visit_date), 0) AS wm FROM moz_historyvisits`);
+  const watermark = Number(rows[0] && rows[0].db_wm) || wm;
   const items = rows
-    .filter((r) => httpUrl(r.url))
+    .filter((r) => r.url && httpUrl(r.url))
     .map((r) => ({ title: (r.title || r.url).trim(), url: r.url.trim(), ts: Number(r.ts) || 0 }));
-  return { items, watermark: Number(maxRow[0] && maxRow[0].wm) || wm };
+  return { items, watermark };
 }
 
 // Typed searches become a search URL on the configured engine, so selecting one
@@ -189,21 +201,28 @@ function searches(formhistory, engineUrl, wm) {
   if (!fs.existsSync(formhistory)) return { items: [], watermark: wm };
   const rows = query(
     formhistory,
-    `SELECT value AS query, CAST(MAX(lastUsed) / 1000 AS INTEGER) AS ts
-     FROM moz_formhistory
-     WHERE fieldname IN ('searchbar-history','search-query-input')
-       AND value IS NOT NULL AND trim(value) <> '' AND lastUsed >= ${wm}
-     GROUP BY value
-     ORDER BY ts DESC`
+    `WITH maxv AS (SELECT COALESCE(MAX(lastUsed), 0) AS wm FROM moz_formhistory),
+     search_rows AS (
+       SELECT value AS query, CAST(MAX(lastUsed) / 1000 AS INTEGER) AS ts
+       FROM moz_formhistory
+       WHERE fieldname IN ('searchbar-history','search-query-input')
+         AND value IS NOT NULL AND trim(value) <> '' AND lastUsed >= ${wm}
+       GROUP BY value
+       ORDER BY ts DESC
+     )
+     SELECT query, ts, (SELECT wm FROM maxv) AS db_wm FROM search_rows
+     UNION ALL
+     SELECT NULL, NULL, (SELECT wm FROM maxv)
+     WHERE NOT EXISTS (SELECT 1 FROM search_rows)`
   );
-  const maxRow = query(formhistory, `SELECT COALESCE(MAX(lastUsed), 0) AS wm FROM moz_formhistory`);
+  const watermark = Number(rows[0] && rows[0].db_wm) || wm;
   const items = rows
     .filter((r) => r.query)
     .map((r) => {
       const q = String(r.query).trim();
       return { title: q, url: engineUrl + encodeURIComponent(q), ts: Number(r.ts) || 0 };
     });
-  return { items, watermark: Number(maxRow[0] && maxRow[0].wm) || wm };
+  return { items, watermark };
 }
 
 // Zen bookmarks (type 1 = bookmark), http(s) only, deduped by URL.
@@ -211,7 +230,9 @@ function bookmarks(places) {
   if (!fs.existsSync(places)) return null;
   const rows = query(
     places,
-    `SELECT p.url AS url, p.title AS title, p.visit_count AS visits
+    `SELECT p.url AS url,
+            COALESCE(NULLIF(b.title,''), NULLIF(p.title,''), p.url) AS title,
+            p.visit_count AS visits
      FROM moz_bookmarks b JOIN moz_places p ON p.id = b.fk
      WHERE b.type = 1 AND p.hidden = 0`
   );
@@ -250,7 +271,7 @@ function mergeHistory(existing, incoming, totalLimit) {
 
 function engineSearchUrl(settings) {
   const engines = Object.assign({}, Lib.BUILTIN_ENGINES);
-  for (const e of settings.engines || []) {
+  for (const e of Array.isArray(settings.engines) ? settings.engines : []) {
     if (e && e.key && e.url) engines[e.key] = e;
   }
   const engine = engines[settings.search_engine] || Lib.BUILTIN_ENGINES.ddg;
@@ -268,8 +289,8 @@ function main() {
   }
 
   const firstRun = !fs.existsSync(STATE_FILE);
-  const state = readJson(STATE_FILE, {});
-  const settings = readJson(SETTINGS_FILE, {});
+  const state = readJson(STATE_FILE, {}) || {};
+  const settings = readJson(SETTINGS_FILE, {}) || {};
 
   const places = path.join(profile, "places.sqlite");
   const signature = dbSignature(places);
@@ -285,8 +306,9 @@ function main() {
     return;
   }
 
-  // A different profile means the old watermarks point into another DB.
-  const profileChanged = Boolean(state.profile) && state.profile !== profile;
+  // A different (or unknown, pre-v2) profile means the old watermarks may point
+  // into another DB. Re-import from zero; mergeHistory caps and dedups it.
+  const profileChanged = !state.profile || state.profile !== profile;
   const pageWatermark = profileChanged ? 0 : Number(state.pageWatermark) || 0;
   const searchWatermark = profileChanged ? 0 : Number(state.searchWatermark) || 0;
 

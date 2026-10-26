@@ -246,7 +246,8 @@ Item {
             ? parsed.modifier.engine
             : (engines[defaultEngineKey] || engines.ddg || Lib.BUILTIN_ENGINES.g);
         var action = parsed.modifier && parsed.modifier.type === "action" ? parsed.modifier.action : null;
-        return { engine: engine, query: parsed.query, action: action };
+        var subset = parsed.modifier && parsed.modifier.type === "subset" ? parsed.modifier.subset : null;
+        return { engine: engine, query: parsed.query, action: action, subset: subset };
     }
 
     function iconFor(kind) {
@@ -377,7 +378,7 @@ Item {
             maxResults: maxResults
         });
 
-        if (ctx.action) {
+        if (ctx.action || ctx.subset) {
             suggestions = [];
         } else {
             maybeFetchSuggestions(ctx, searchText);
@@ -501,8 +502,11 @@ Item {
         if (!pluginApi || !url) {
             return;
         }
-        for (var i = 0; i < bookmarks.length; i++) {
-            if (bookmarks[i].url === url) {
+        // Only the plugin's own list is checked here: a Zen bookmark is imported
+        // automatically, but an explicit `bookmark <url>` should persist locally.
+        var own = pluginApi.pluginSettings.bookmarks || [];
+        for (var i = 0; i < own.length; i++) {
+            if (own[i].url === url) {
                 if (launcher) {
                     launcher.close();
                 }
@@ -511,7 +515,7 @@ Item {
             }
         }
         var title = knownTitle(url) || url;
-        var fresh = (pluginApi.pluginSettings.bookmarks || []).slice();
+        var fresh = own.slice();
         fresh.unshift({ "title": title, "url": url, "visits": 0 });
         pluginApi.pluginSettings.bookmarks = fresh;
         selfBookmarks = fresh;

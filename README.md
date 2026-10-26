@@ -70,7 +70,7 @@ With an empty query, `h `, `b ` and `sh ` list up to 50 entries: history newest 
 ```
 >web bookmark https://example.com
 ```
-`bookmark <url>` turns the input into a "Bookmark …" action. Pressing Enter adds the URL to the plugin's bookmarks, closes the launcher and shows a toast. Quotes around the URL are ignored, and a bare domain gets `https://` (localhost and IP addresses get `http://`). If the URL is already bookmarked, nothing changes. The title comes from history or an existing bookmark; otherwise the page title is fetched, falling back to the URL. If the argument is not a URL, the `bookmark` modifier is ignored and the rest is treated as a normal query.
+`bookmark <url>` turns the input into a "Bookmark …" action. Pressing Enter adds the URL to the plugin's own bookmark list, closes the launcher and shows a toast. Quotes around the URL are ignored, and a bare domain gets `https://` (localhost and IP addresses get `http://`). If the URL is already in that own list, nothing changes; a page that only exists in the Zen import is added locally, so it survives a later Zen removal. The title comes from history or an existing bookmark; otherwise the page title is fetched, falling back to the URL. If the argument is not a URL, the `bookmark` modifier is ignored and the rest is treated as a normal query.
 
 ### Zen history and bookmarks
 

@@ -17,13 +17,27 @@ function readJson(file, fallback) {
   }
 }
 
-const settings = readJson(path.join(DATA_DIR, "settings.json"), {});
-const imported = readJson(path.join(DATA_DIR, "history.json"), { items: [], bookmarks: [] });
-const history = imported.items || [];
+const settings = readJson(path.join(DATA_DIR, "settings.json"), {}) || {};
+const imported = readJson(path.join(DATA_DIR, "history.json"), { items: [], bookmarks: [] }) || {};
+const localHistory = Array.isArray(settings.history) ? settings.history : [];
+const importedItems = Array.isArray(imported.items) ? imported.items : [];
+const localBookmarks = Array.isArray(settings.bookmarks) ? settings.bookmarks : [];
+const importedBookmarks = Array.isArray(imported.bookmarks) ? imported.bookmarks : [];
+
+const historyByUrl = new Map();
+for (const h of [...localHistory, ...importedItems]) {
+  if (!h || !h.url) continue;
+  const ts = Number(h.ts) || 0;
+  const prev = historyByUrl.get(h.url);
+  if (!prev || ts > prev.ts) {
+    historyByUrl.set(h.url, { title: h.title || h.url, url: h.url, ts });
+  }
+}
+const history = [...historyByUrl.values()].sort((a, b) => b.ts - a.ts);
 
 // Settings bookmarks win titles; imported Zen bookmarks add new URLs.
 const bookmarksByUrl = new Map();
-for (const b of [...(imported.bookmarks || []), ...(settings.bookmarks || [])]) {
+for (const b of [...importedBookmarks, ...localBookmarks]) {
   if (!b || !b.url) continue;
   const prev = bookmarksByUrl.get(b.url);
   bookmarksByUrl.set(b.url, {
@@ -35,6 +49,8 @@ for (const b of [...(imported.bookmarks || []), ...(settings.bookmarks || [])]) 
 const bookmarks = [...bookmarksByUrl.values()];
 
 const engines = L.allEngines(settings.engines);
+const rawMax = Math.round(Number(settings.max_results));
+const maxResults = isFinite(rawMax) ? Math.min(20, Math.max(1, rawMax)) : 8;
 
 function results(text) {
   return L.getResults({
@@ -45,7 +61,7 @@ function results(text) {
     shortcuts: settings.shortcuts || [],
     history,
     directUrl: settings.direct_url !== false,
-    maxResults: settings.max_results || 8
+    maxResults
   });
 }
 

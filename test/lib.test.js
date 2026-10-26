@@ -64,7 +64,12 @@ check("hostMatches exact hosts, subdomains and bare labels", () => {
   assert.ok(!L.hostMatches("notyoutube.com", "youtube.com"));
   assert.ok(L.hostMatches("www.duckduckgo.com", "duckduckgo"));
   assert.ok(!L.hostMatches("notduckduckgo.com", "duckduckgo"));
+  assert.ok(!L.hostMatches("youtube.com.evil.com", "youtube"));
   assert.ok(L.hostMatches("github.com", "www.github.com"));
+  assert.ok(!L.hostMatches("example.com", "www.com"));
+  assert.ok(L.hostMatches("example.com", "https://example.com/path"));
+  assert.ok(L.hostMatches("example.com", "example.com:443"));
+  assert.ok(L.hostMatches("localhost", "localhost:3000"));
   assert.ok(L.hostMatches("anything.example", ""));
   assert.ok(!L.hostMatches("", "example.com"));
 });
@@ -201,8 +206,8 @@ check("scores interoperate with normalized 0..1 app scores", () => {
 });
 
 check("maxResults caps output", () => {
-  const r = run("", { maxResults: 2 });
-  assert.ok(r.length <= 2);
+  const r = run("e", { maxResults: 2 });
+  assert.ok(r.length > 0 && r.length <= 2, "got " + r.length);
 });
 
 check("bookmark action parses as an action modifier", () => {

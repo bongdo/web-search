@@ -7,6 +7,7 @@ const { execFileSync, spawnSync } = require("child_process");
 const {
   mergeHistory,
   pages,
+  searches,
   bookmarks,
   resolveDataDir,
   zenProfile,
@@ -164,22 +165,22 @@ if (!hasSqlite) {
       execFileSync("sqlite3", [
         db,
         `CREATE TABLE moz_places (id INTEGER PRIMARY KEY, url TEXT, title TEXT, hidden INTEGER DEFAULT 0, visit_count INTEGER DEFAULT 0);
-         CREATE TABLE moz_bookmarks (id INTEGER PRIMARY KEY, type INTEGER, fk INTEGER);
+         CREATE TABLE moz_bookmarks (id INTEGER PRIMARY KEY, type INTEGER, fk INTEGER, title TEXT);
          INSERT INTO moz_places VALUES (1, 'https://a.example/', 'A', 0, 7);
          INSERT INTO moz_places VALUES (2, 'https://hidden.example/', 'Hidden', 1, 99);
          INSERT INTO moz_places VALUES (3, 'ftp://files.example/', 'FTP', 0, 3);
          INSERT INTO moz_places VALUES (4, 'https://a.example/', '', 0, 9);
          INSERT INTO moz_places VALUES (5, 'https://b.example/', 'B', 0, 2);
-         INSERT INTO moz_bookmarks VALUES (1, 1, 1);
-         INSERT INTO moz_bookmarks VALUES (2, 1, 2);
-         INSERT INTO moz_bookmarks VALUES (3, 1, 3);
-         INSERT INTO moz_bookmarks VALUES (4, 1, 1);
-         INSERT INTO moz_bookmarks VALUES (5, 1, 4);
-         INSERT INTO moz_bookmarks VALUES (6, 1, 5);`,
+         INSERT INTO moz_bookmarks VALUES (1, 1, 1, 'Bookmark A');
+         INSERT INTO moz_bookmarks VALUES (2, 1, 2, NULL);
+         INSERT INTO moz_bookmarks VALUES (3, 1, 3, NULL);
+         INSERT INTO moz_bookmarks VALUES (4, 1, 1, NULL);
+         INSERT INTO moz_bookmarks VALUES (5, 1, 4, NULL);
+         INSERT INTO moz_bookmarks VALUES (6, 1, 5, 'Bookmark B');`,
       ]);
       assert.deepStrictEqual(bookmarks(db), [
-        { title: "A", url: "https://a.example/", visits: 9 },
-        { title: "B", url: "https://b.example/", visits: 2 },
+        { title: "Bookmark A", url: "https://a.example/", visits: 9 },
+        { title: "Bookmark B", url: "https://b.example/", visits: 2 },
       ]);
       assert.strictEqual(bookmarks(path.join(tmp, "missing.sqlite")), null);
     }));
@@ -209,6 +210,26 @@ if (!hasSqlite) {
       const atMax = pages(db, 3000);
       assert.deepStrictEqual(atMax.items.map((x) => x.url), ["https://new.example/"]);
       assert.strictEqual(atMax.watermark, 3000);
+    }));
+
+  check("searches includes a row exactly at the watermark", () =>
+    withTmp((tmp) => {
+      const db = path.join(tmp, "formhistory.sqlite");
+      execFileSync("sqlite3", [
+        db,
+        `CREATE TABLE moz_formhistory (id INTEGER PRIMARY KEY, fieldname TEXT, value TEXT, lastUsed INTEGER);
+         INSERT INTO moz_formhistory VALUES (1, 'searchbar-history', 'old term', 1000);
+         INSERT INTO moz_formhistory VALUES (2, 'searchbar-history', 'edge term', 2000);
+         INSERT INTO moz_formhistory VALUES (3, 'searchbar-history', 'new term', 3000);
+         INSERT INTO moz_formhistory VALUES (4, 'other', 'ignored', 4000);`,
+      ]);
+
+      const atEdge = searches(db, "https://e.example/?q=", 2000);
+      assert.deepStrictEqual(atEdge.items.map((x) => x.url), [
+        "https://e.example/?q=new%20term",
+        "https://e.example/?q=edge%20term",
+      ]);
+      assert.strictEqual(atEdge.watermark, 4000);
     }));
 }
 

@@ -114,10 +114,19 @@ function hostOf(url) {
 }
 
 // True for an exact host, a subdomain of a dotted domain, or a matching label
-// for a bare domain key ("youtube" matches www.youtube.com, not notyoutube.com).
+// for a bare domain key ("youtube" matches www.youtube.com, not
+// youtube.com.evil.com). Accepts a full URL or host:port in the filter.
 function hostMatches(host, domain) {
-    var h = (host || "").toLowerCase();
-    var d = (domain || "").toLowerCase().replace(/^www\./, "");
+    var h = (host || "").toLowerCase().replace(/^www\./, "").replace(/:[0-9]+$/, "");
+    var d = (domain || "").toLowerCase().replace(/^\s+|\s+$/g, "");
+    if (d === "") {
+        return true;
+    }
+    d = d.replace(/^[a-z][a-z0-9+.-]*:\/\//, "").replace(/^\/\/+/, "").replace(/^.*@/, "");
+    d = d.split(/[\/?#]/)[0].replace(/^\.+/, "").replace(/:[0-9]+$/, "");
+    if (d.slice(0, 4) === "www." && d.slice(4).indexOf(".") !== -1) {
+        d = d.slice(4);
+    }
     if (d === "") {
         return true;
     }
@@ -127,8 +136,9 @@ function hostMatches(host, domain) {
     if (d.indexOf(".") !== -1) {
         return h.slice(-(d.length + 1)) === "." + d;
     }
+    // A bare key should match a registrable domain, not an arbitrary label.
     var labels = h.split(".");
-    for (var i = 0; i < labels.length; i++) {
+    for (var i = Math.max(0, labels.length - 3); i < labels.length; i++) {
         if (labels[i] === d) {
             return true;
         }
