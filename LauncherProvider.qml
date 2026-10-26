@@ -18,7 +18,11 @@ Item {
 
     // Lazily loaded user data
     property var engines: ({})
+    // `bookmarks` is the merged search pool: launcher bookmarks (selfBookmarks,
+    // in settings.json) plus any imported from the tool-owned history.json.
     property var bookmarks: []
+    property var selfBookmarks: []
+    property var importedBookmarks: []
     property var shortcuts: []
     // `history` is the merged view used by search: pages the launcher recorded
     // (selfHistory, in settings.json) plus the Zen import (importedHistory,
@@ -61,7 +65,8 @@ Item {
 
     function loadData() {
         engines = Lib.allEngines(cfgValue("engines", []));
-        bookmarks = cfgValue("bookmarks", []);
+        selfBookmarks = cfgValue("bookmarks", []);
+        rebuildBookmarks();
         shortcuts = cfgValue("shortcuts", []);
         selfHistory = cfgValue("history", []);
         rebuildHistory();
@@ -69,7 +74,8 @@ Item {
         directUrl = cfgValue("direct_url", true);
         showSuggestions = cfgValue("show_suggestions", true);
         favicons = cfgValue("favicons", true);
-        maxResults = cfgValue("max_results", 8);
+        var configuredResults = Math.round(Number(cfgValue("max_results", 8)));
+        maxResults = isFinite(configuredResults) ? Math.min(20, Math.max(1, configuredResults)) : 8;
         lastQuery = "";
         suggestions = [];
         if (favicons && !faviconSeeded && cacheDir() !== "") {
@@ -114,10 +120,82 @@ Item {
         history = out;
     }
 
-    function refreshImportedHistory() {
-        if (pluginApi) {
-            importedReader.running = true;
+    // Merge local and imported bookmarks by URL; local titles win and visits
+    // are the max from either source.
+    function rebuildBookmarks() {
+        var byUrl = ({});
+        var lists = [importedBookmarks, selfBookmarks];
+        for (var i = 0; i < lists.length; i++) {
+            for (var j = 0; j < lists[i].length; j++) {
+                var e = lists[i][j];
+                if (!e || !e.url) {
+                    continue;
+                }
+                var visits = Number(e.visits) || 0;
+                var prev = byUrl[e.url];
+                if (!prev) {
+                    byUrl[e.url] = { "title": e.title || e.url, "url": e.url, "visits": visits };
+                    continue;
+                }
+                if (e.title) {
+                    prev.title = e.title;
+                }
+                prev.visits = Math.max(prev.visits || 0, visits);
+            }
         }
+        var out = [];
+        for (var url in byUrl) {
+            out.push(byUrl[url]);
+        }
+        out.sort(function (a, b) {
+            if ((a.visits || 0) !== (b.visits || 0)) {
+                return (b.visits || 0) - (a.visits || 0);
+            }
+            return (a.title || "").localeCompare(b.title || "");
+        });
+        bookmarks = out;
+    }
+
+    function applyImportedData(raw) {
+        var data = null;
+        try {
+            data = JSON.parse(raw || "");
+        } catch (e) {
+            Logger.w("WebSearch", "history.json parse error: " + e);
+            return;
+        }
+        if (!data || typeof data !== "object" || Array.isArray(data)) {
+            Logger.w("WebSearch", "history.json has an unexpected shape; keeping the previous import");
+            return;
+        }
+        var hasItems = Array.isArray(data.items);
+        var hasBookmarks = Array.isArray(data.bookmarks);
+        if ((data.items !== undefined && !hasItems) || (data.bookmarks !== undefined && !hasBookmarks) || (!hasItems && !hasBookmarks)) {
+            Logger.w("WebSearch", "history.json has no valid items/bookmarks; keeping the previous import");
+            return;
+        }
+        if (hasItems) {
+            importedHistory = data.items;
+        }
+        if (hasBookmarks) {
+            importedBookmarks = data.bookmarks;
+        }
+        rebuildHistory();
+        rebuildBookmarks();
+        Logger.i("WebSearch", "Imported " + importedHistory.length + " history entries and " + importedBookmarks.length + " bookmarks");
+        if (launcher) {
+            launcher.updateResults();
+        }
+    }
+
+    function refreshImportedHistory() {
+        if (importedHistoryFile.path) {
+            importedHistoryFile.reload();
+        }
+    }
+
+    function shellQuote(s) {
+        return "'" + String(s).replace(/'/g, "'\\''") + "'";
     }
 
     // The tool is incremental, so a diff is cheap enough to run on every open.
@@ -128,15 +206,24 @@ Item {
         }
         syncingHistory = true;
         historySync.running = true;
+        syncWatchdog.restart();
     }
 
     function syncCommand() {
-        return "n=\"$HOME/.local/bin/node\"; [ -x \"$n\" ] || n=\"$HOME/.hermes/node/bin/node\"; "
-            + "[ -x \"$n\" ] || n=node; exec \"$n\" '" + historyScript() + "' >/dev/null 2>&1";
+        return "n=\"$HOME/.local/bin/node\"; "
+            + "[ -x \"$n\" ] || n=\"$HOME/.hermes/node/bin/node\"; "
+            + "[ -x \"$n\" ] || n=\"$HOME/.nix-profile/bin/node\"; "
+            + "[ -x \"$n\" ] || n=\"/etc/profiles/per-user/$USER/bin/node\"; "
+            + "[ -x \"$n\" ] || n=\"/run/current-system/sw/bin/node\"; "
+            + "[ -x \"$n\" ] || n=\"$(command -v node 2>/dev/null)\"; "
+            + "if [ ! -x \"$n\" ]; then "
+            + "echo 'web-search: node not found; checked $HOME/.local/bin, $HOME/.hermes/node/bin, $HOME/.nix-profile/bin, /etc/profiles/per-user/$USER/bin, /run/current-system/sw/bin and PATH' >&2; "
+            + "exit 127; fi; "
+            + "exec \"$n\" " + shellQuote(historyScript()) + " --data-dir " + shellQuote(pluginApi ? pluginApi.pluginDir : "");
     }
 
     function handleCommand(searchText) {
-        return searchText.startsWith(">web");
+        return /^>web(?:\s|$)/.test(searchText);
     }
 
     function commands() {
@@ -157,7 +244,7 @@ Item {
         var parsed = Lib.parseQuery(Lib.stripCommand(searchText), engines);
         var engine = parsed.modifier && parsed.modifier.type === "engine"
             ? parsed.modifier.engine
-            : (engines[defaultEngineKey] || Lib.BUILTIN_ENGINES.g);
+            : (engines[defaultEngineKey] || engines.ddg || Lib.BUILTIN_ENGINES.g);
         var action = parsed.modifier && parsed.modifier.type === "action" ? parsed.modifier.action : null;
         return { engine: engine, query: parsed.query, action: action };
     }
@@ -269,6 +356,7 @@ Item {
     }
 
     function getImageUrl(item) {
+        void root.imageRevision;
         if (!item || !favicons) {
             return "";
         }
@@ -331,29 +419,26 @@ Item {
 
     function fetchSuggestions(query, suggestUrl) {
         var xhr = new XMLHttpRequest();
+        xhr.timeout = 8000;
         xhr.onreadystatechange = function () {
-            if (xhr.readyState !== XMLHttpRequest.DONE || xhr.status !== 200) {
+            if (xhr.readyState !== XMLHttpRequest.DONE) {
                 return;
             }
             if (query !== lastQuery) {
                 return;
             }
+            if (xhr.status !== 200) {
+                Logger.w("WebSearch", "Suggestion request failed: HTTP " + xhr.status);
+                return;
+            }
             try {
-                var data = JSON.parse(xhr.responseText);
-                if (Array.isArray(data) && data.length > 0) {
-                    if (typeof data[0] === "object" && data[0].phrase !== undefined) {
-                        // DuckDuckGo: [{"phrase": "..."}, ...]
-                        suggestions = data.map(function (item) { return item.phrase; }).slice(0, maxResults);
-                    } else if (data.length > 1 && Array.isArray(data[1])) {
-                        // Google / Bing / Yandex: ["query", ["s1", "s2"]]
-                        suggestions = data[1].slice(0, maxResults);
-                    }
-                    if (launcher) {
-                        launcher.updateResults();
-                    }
+                var parsed = Lib.parseSuggestions(JSON.parse(xhr.responseText));
+                suggestions = (parsed || []).slice(0, maxResults);
+                if (launcher) {
+                    launcher.updateResults();
                 }
             } catch (e) {
-                Logger.e("WebSearch", "Suggestion parse error: " + e);
+                Logger.w("WebSearch", "Suggestion parse error: " + e);
             }
         };
         xhr.open("GET", suggestUrl + encodeURIComponent(query));
@@ -416,9 +501,8 @@ Item {
         if (!pluginApi || !url) {
             return;
         }
-        var list = pluginApi.pluginSettings.bookmarks || [];
-        for (var i = 0; i < list.length; i++) {
-            if (list[i].url === url) {
+        for (var i = 0; i < bookmarks.length; i++) {
+            if (bookmarks[i].url === url) {
                 if (launcher) {
                     launcher.close();
                 }
@@ -427,10 +511,11 @@ Item {
             }
         }
         var title = knownTitle(url) || url;
-        var fresh = list.slice();
+        var fresh = (pluginApi.pluginSettings.bookmarks || []).slice();
         fresh.unshift({ "title": title, "url": url, "visits": 0 });
         pluginApi.pluginSettings.bookmarks = fresh;
-        bookmarks = fresh;
+        selfBookmarks = fresh;
+        rebuildBookmarks();
         pluginApi.saveSettings();
         if (launcher) {
             launcher.close();
@@ -456,7 +541,8 @@ Item {
             }
         }
         if (changed) {
-            bookmarks = list;
+            selfBookmarks = list;
+            rebuildBookmarks();
             pluginApi.saveSettings();
         }
     }
@@ -484,45 +570,63 @@ Item {
     // Populates the in-memory cache from the on-disk favicon cache.
     Process {
         id: faviconList
-        command: ["sh", "-c", "ls -1 '" + root.cacheDir() + "' 2>/dev/null"]
+        command: ["sh", "-c", "ls -1 " + root.shellQuote(root.cacheDir()) + " 2>/dev/null"]
         stdout: StdioCollector {
             id: faviconListStdout
         }
         onExited: root.seedFaviconCache(String(faviconListStdout.text || ""))
     }
 
-    // Reads the tool-owned Zen history import (history.json) and merges it in.
-    Process {
-        id: importedReader
-        command: ["sh", "-c", "cat '" + root.historyFile() + "' 2>/dev/null"]
-        stdout: StdioCollector {
-            id: importedReaderStdout
-        }
-        onExited: {
-            var items = [];
-            try {
-                var data = JSON.parse(String(importedReaderStdout.text || ""));
-                if (data && Array.isArray(data.items)) {
-                    items = data.items;
-                }
-            } catch (e) {
-                // No import yet, or a partial write: keep the current view.
-            }
-            root.importedHistory = items;
-            root.rebuildHistory();
-            if (root.launcher) {
-                root.launcher.updateResults();
-            }
-        }
+    // Watches the tool-owned Zen import (history.json) and merges it in.
+    // FileView reloads on change, so there is no reader process or running flag.
+    FileView {
+        id: importedHistoryFile
+        path: root.historyFile()
+        watchChanges: true
+        printErrors: false
+        onLoaded: root.applyImportedData(text())
+        onFileChanged: reload()
+        onLoadFailed: (error) => Logger.w("WebSearch", "Could not read " + root.historyFile() + " (" + error + ")")
     }
 
     // Runs the incremental import tool; on exit the fresh history.json is read.
     Process {
         id: historySync
         command: ["sh", "-c", root.syncCommand()]
-        onExited: {
+        stdout: StdioCollector {
+            id: syncStdout
+        }
+        stderr: StdioCollector {
+            id: syncStderr
+        }
+        onExited: (code) => {
             root.syncingHistory = false;
+            syncWatchdog.stop();
+            var out = String(syncStdout.text || "").replace(/\s+/g, " ").replace(/^\s+|\s+$/g, "");
+            var err = String(syncStderr.text || "").replace(/\s+$/, "");
+            if (code !== 0) {
+                Logger.e("WebSearch", "History sync failed (exit " + code + "): " + err);
+            } else {
+                if (err !== "") {
+                    Logger.w("WebSearch", "History sync stderr: " + err);
+                }
+                Logger.i("WebSearch", "History sync: " + (out !== "" ? out : "finished"));
+            }
             root.refreshImportedHistory();
+        }
+    }
+
+    // A hung sqlite3/node must not disable sync forever by leaving the flag set.
+    Timer {
+        id: syncWatchdog
+        interval: 60000
+        repeat: false
+        onTriggered: {
+            if (root.syncingHistory) {
+                Logger.w("WebSearch", "History sync timed out after 60s; stopping it");
+                root.syncingHistory = false;
+                historySync.running = false;
+            }
         }
     }
 
@@ -535,7 +639,7 @@ Item {
         Process {
             property string domain
             property string destPath
-            command: ["sh", "-c", "mkdir -p '" + root.cacheDir() + "' && { [ -f '" + destPath + "' ] || curl -fsSL --max-time 8 -o '" + destPath + "' '" + root.faviconUrl(domain) + "'; }"]
+            command: ["sh", "-c", "mkdir -p " + root.shellQuote(root.cacheDir()) + " && { [ -f " + root.shellQuote(destPath) + " ] || curl -fsSL --max-time 8 -o " + root.shellQuote(destPath) + " " + root.shellQuote(root.faviconUrl(domain)) + "; }"]
 
             onExited: (code) => {
                 if (code === 0) {

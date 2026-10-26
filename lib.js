@@ -7,7 +7,7 @@ var BUILTIN_ENGINES = {
     bing: { name: "Bing",       url: "https://www.bing.com/search?q=",                  domain: "bing",       suggest: "https://www.bing.com/osjson.aspx?query=" },
     brave:{ name: "Brave",      url: "https://search.brave.com/search?q=",              domain: "brave",      suggest: "https://search.brave.com/api/suggest?q=" },
     ya:   { name: "Yandex",     url: "https://yandex.com/search/?text=",                domain: "yandex",     suggest: "https://suggest.yandex.com/suggest-ya.cgi?v=4&part=" },
-    y:    { name: "YouTube",    url: "https://www.youtube.com/results?search_query=",   domain: "youtube",    suggest: "https://suggestqueries.google.com/complete/search?client=youtube&ds=yt&q=" }
+    y:    { name: "YouTube",    url: "https://www.youtube.com/results?search_query=",   domain: "youtube",    suggest: "https://suggestqueries.google.com/complete/search?client=chrome&ds=yt&q=" }
 };
 
 // Subset modifiers: restrict the pool to one kind of user data.
@@ -73,7 +73,7 @@ function allEngines(customList) {
 
 function stripCommand(text) {
     var t = (text || "").replace(/^\s+/, "");
-    if (t.indexOf(">web") === 0) {
+    if (/^>web(\s|$)/.test(t)) {
         return t.slice(4).replace(/^\s+/, "");
     }
     return t;
@@ -105,8 +105,35 @@ function parseQuery(text, engines) {
 }
 
 function hostOf(url) {
-    var m = /^https?:\/\/([^\/]+)/i.exec(url || "");
-    return m ? m[1].replace(/^.*@/, "").toLowerCase() : "";
+    var m = /^https?:\/\/([^\/?#]*)/i.exec(url || "");
+    if (!m) {
+        return "";
+    }
+    // Credentials come before an @, the port is the trailing :digits.
+    return m[1].replace(/^.*@/, "").replace(/:[0-9]+$/, "").toLowerCase();
+}
+
+// True for an exact host, a subdomain of a dotted domain, or a matching label
+// for a bare domain key ("youtube" matches www.youtube.com, not notyoutube.com).
+function hostMatches(host, domain) {
+    var h = (host || "").toLowerCase();
+    var d = (domain || "").toLowerCase().replace(/^www\./, "");
+    if (d === "") {
+        return true;
+    }
+    if (h === d) {
+        return true;
+    }
+    if (d.indexOf(".") !== -1) {
+        return h.slice(-(d.length + 1)) === "." + d;
+    }
+    var labels = h.split(".");
+    for (var i = 0; i < labels.length; i++) {
+        if (labels[i] === d) {
+            return true;
+        }
+    }
+    return false;
 }
 
 function isUrl(text) {
@@ -145,12 +172,49 @@ function normalizeUrl(text) {
     return "https://" + t;
 }
 
+// Suggestion payloads vary by engine: DDG sends [{phrase}], Google/Bing/Brave/
+// Yandex send [query, [..]], and custom endpoints may send {suggestions:[..]}.
+function parseSuggestions(data) {
+    var list = null;
+    if (Array.isArray(data)) {
+        if (data.length > 1 && Array.isArray(data[1])) {
+            list = data[1];
+        } else if (data.length && data[0] && typeof data[0] === "object") {
+            list = [];
+            for (var i = 0; i < data.length; i++) {
+                if (data[i] && typeof data[i].phrase === "string") {
+                    list.push(data[i].phrase);
+                }
+            }
+        } else {
+            list = data;
+        }
+    } else if (data && typeof data === "object" && Array.isArray(data.suggestions)) {
+        list = data.suggestions;
+    }
+    if (!list) {
+        return [];
+    }
+
+    var out = [];
+    for (var j = 0; j < list.length; j++) {
+        var s = typeof list[j] === "string" ? list[j].trim() : "";
+        if (s === "") {
+            continue;
+        }
+        if (out.indexOf(s) === -1) {
+            out.push(s);
+        }
+    }
+    return out;
+}
+
 function scoreBookmark(bookmark, q, poolDomain) {
     var title = (bookmark.title || "").toLowerCase();
     var url = (bookmark.url || "").toLowerCase();
     var host = hostOf(bookmark.url);
 
-    if (poolDomain && url.indexOf(poolDomain) === -1) {
+    if (poolDomain && !hostMatches(host, poolDomain)) {
         return -1;
     }
     if (q === "") {
@@ -177,7 +241,7 @@ function scoreShortcut(shortcut, q, poolDomain) {
     var url = (shortcut.url || "").toLowerCase();
     var host = hostOf(shortcut.url);
 
-    if (poolDomain && url.indexOf(poolDomain) === -1) {
+    if (poolDomain && !hostMatches(host, poolDomain)) {
         return -1;
     }
     if (q === "") {
@@ -207,7 +271,7 @@ function byVisitsThenTitle(a, b) {
     if (va !== vb) {
         return vb - va;
     }
-    return (a.title || a.alias || "").localeCompare(b.title || b.alias || "");
+    return (a.title || a.name || a.alias || "").localeCompare(b.title || b.name || b.alias || "");
 }
 
 function scoreHistory(item, q, poolDomain) {
@@ -215,7 +279,7 @@ function scoreHistory(item, q, poolDomain) {
     var url = (item.url || "").toLowerCase();
     var host = hostOf(item.url);
 
-    if (poolDomain && url.indexOf(poolDomain) === -1) {
+    if (poolDomain && !hostMatches(host, poolDomain)) {
         return -1;
     }
     if (q === "") {
@@ -240,7 +304,8 @@ function scoreHistory(item, q, poolDomain) {
 function getResults(opts) {
     var raw = stripCommand(opts.text || "");
     var engines = opts.engines || allEngines();
-    var defaultKey = opts.defaultEngineKey && engines[opts.defaultEngineKey] ? opts.defaultEngineKey : "g";
+    var fallbackKey = engines.ddg ? "ddg" : "g";
+    var defaultKey = opts.defaultEngineKey && engines[opts.defaultEngineKey] ? opts.defaultEngineKey : fallbackKey;
     var parsed = parseQuery(raw, engines);
     var modifier = parsed.modifier;
     var query = parsed.query;
@@ -401,8 +466,10 @@ if (typeof module !== "undefined" && module.exports) {
         stripCommand: stripCommand,
         parseQuery: parseQuery,
         hostOf: hostOf,
+        hostMatches: hostMatches,
         isUrl: isUrl,
         normalizeUrl: normalizeUrl,
+        parseSuggestions: parseSuggestions,
         getResults: getResults
     };
 }

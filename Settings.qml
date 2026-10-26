@@ -31,6 +31,10 @@ ColumnLayout {
         return cfg[key] ?? defaults[key];
     }
 
+    function trimmed(value) {
+        return (value === undefined || value === null ? "" : String(value)).trim();
+    }
+
     function copyList(list) {
         var out = [];
         if (Array.isArray(list)) {
@@ -108,15 +112,60 @@ ColumnLayout {
             Logger.e("WebSearch", "Cannot save settings: pluginApi is null");
             return;
         }
-        var cleanEngines = engines.filter(function (e) { return e.key && e.url; });
-        var cleanBookmarks = bookmarks.filter(function (b) { return b.url; });
-        var cleanShortcuts = shortcuts.filter(function (s) { return s.alias && s.url; });
 
-        pluginApi.pluginSettings.search_engine = root.valueSearchEngine;
+        var cleanEngines = engines.map(function (e) {
+            return {
+                "key": trimmed(e.key),
+                "name": trimmed(e.name),
+                "url": trimmed(e.url),
+                "domain": trimmed(e.domain),
+                "suggest": trimmed(e.suggest)
+            };
+        }).filter(function (e) {
+            return e.key !== "" && e.url !== "";
+        });
+        var cleanBookmarks = bookmarks.map(function (b) {
+            return {
+                "title": trimmed(b.title),
+                "url": trimmed(b.url),
+                "visits": Number(b.visits) || 0
+            };
+        }).filter(function (b) {
+            return b.url !== "";
+        });
+        var cleanShortcuts = shortcuts.map(function (s) {
+            return {
+                "alias": trimmed(s.alias),
+                "name": trimmed(s.name),
+                "url": trimmed(s.url)
+            };
+        }).filter(function (s) {
+            return s.alias !== "" && s.url !== "";
+        });
+
+        // The selected engine must still exist after trimming/dropping rows.
+        var available = {};
+        for (var builtinKey in Lib.BUILTIN_ENGINES) {
+            available[builtinKey] = true;
+        }
+        for (var i = 0; i < cleanEngines.length; i++) {
+            available[cleanEngines[i].key] = true;
+        }
+        var searchEngine = available[root.valueSearchEngine] === true ? root.valueSearchEngine : "ddg";
+
+        var maxResults = Math.round(Number(root.valueMaxResults));
+        if (!isFinite(maxResults)) {
+            maxResults = 8;
+        }
+        maxResults = Math.max(1, Math.min(20, maxResults));
+
+        root.valueSearchEngine = searchEngine;
+        root.valueMaxResults = maxResults;
+        pluginApi.pluginSettings.search_engine = searchEngine;
         pluginApi.pluginSettings.direct_url = root.valueDirectUrl;
         pluginApi.pluginSettings.show_suggestions = root.valueShowSuggestions;
         pluginApi.pluginSettings.favicons = root.valueFavicons;
-        pluginApi.pluginSettings.max_results = root.valueMaxResults;
+        pluginApi.pluginSettings.max_results = maxResults;
         pluginApi.pluginSettings.engines = cleanEngines;
         pluginApi.pluginSettings.bookmarks = cleanBookmarks;
         pluginApi.pluginSettings.shortcuts = cleanShortcuts;

@@ -43,6 +43,49 @@ check("stripCommand removes >web", () => {
   assert.strictEqual(L.stripCommand("cats"), "cats");
 });
 
+check("stripCommand only strips >web at a word boundary", () => {
+  assert.strictEqual(L.stripCommand(">web"), "");
+  assert.strictEqual(L.stripCommand(">web  cats"), "cats");
+  assert.strictEqual(L.stripCommand("  >web cats"), "cats");
+  assert.strictEqual(L.stripCommand(">webfoo"), ">webfoo");
+});
+
+check("hostOf keeps only the lowercased host", () => {
+  assert.strictEqual(L.hostOf("https://example.com/path"), "example.com");
+  assert.strictEqual(L.hostOf("https://example.com?x=1"), "example.com");
+  assert.strictEqual(L.hostOf("https://example.com#frag"), "example.com");
+  assert.strictEqual(L.hostOf("http://user@Example.com:8080/a"), "example.com");
+  assert.strictEqual(L.hostOf("http://user:pass@example.com:8080/a"), "example.com");
+});
+
+check("hostMatches exact hosts, subdomains and bare labels", () => {
+  assert.ok(L.hostMatches("youtube.com", "youtube.com"));
+  assert.ok(L.hostMatches("www.youtube.com", "youtube.com"));
+  assert.ok(!L.hostMatches("notyoutube.com", "youtube.com"));
+  assert.ok(L.hostMatches("www.duckduckgo.com", "duckduckgo"));
+  assert.ok(!L.hostMatches("notduckduckgo.com", "duckduckgo"));
+  assert.ok(L.hostMatches("github.com", "www.github.com"));
+  assert.ok(L.hostMatches("anything.example", ""));
+  assert.ok(!L.hostMatches("", "example.com"));
+});
+
+check("parseSuggestions handles every supported shape", () => {
+  assert.deepStrictEqual(L.parseSuggestions({ suggestions: ["a", "", "b", "a"] }), ["a", "b"]);
+  assert.deepStrictEqual(L.parseSuggestions(["a", "b", "a"]), ["a", "b"]);
+  assert.deepStrictEqual(L.parseSuggestions([{ phrase: "cats" }, { phrase: "dogs" }, { phrase: "cats" }]), ["cats", "dogs"]);
+  assert.deepStrictEqual(L.parseSuggestions(["query", ["s1", "s2", "s1"], []]), ["s1", "s2"]);
+});
+
+check("parseSuggestions is defensive about junk", () => {
+  assert.deepStrictEqual(L.parseSuggestions(null), []);
+  assert.deepStrictEqual(L.parseSuggestions(undefined), []);
+  assert.deepStrictEqual(L.parseSuggestions(42), []);
+  assert.deepStrictEqual(L.parseSuggestions("nope"), []);
+  assert.deepStrictEqual(L.parseSuggestions({}), []);
+  assert.deepStrictEqual(L.parseSuggestions([]), []);
+  assert.deepStrictEqual(L.parseSuggestions([1, null, "", { phrase: 3 }, "ok"]), ["ok"]);
+});
+
 check("engine modifier parsed with y and ya", () => {
   const y = L.parseQuery("y cats", engines);
   assert.strictEqual(y.modifier.type, "engine");
@@ -102,6 +145,11 @@ check("fallback query yields a single low-priority search row", () => {
   const r = run("zzz nothing");
   assert.strictEqual(r[0].kind, "search");
   assert.strictEqual(r[0].score, L.SCORE.fallbackSearch);
+});
+
+check("unknown default engine falls back to DuckDuckGo", () => {
+  const r = run("cats", { defaultEngineKey: "missing" });
+  assert.ok(r[0].url.startsWith("https://duckduckgo.com/?q="));
 });
 
 check("subset sh returns only shortcuts and no search row", () => {

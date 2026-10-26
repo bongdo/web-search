@@ -7,20 +7,21 @@
 //   ~/.config/ww/bookmarks.json   [{title,url,visits}]
 //   <zen profile>/places.sqlite   moz_bookmarks (type=1)
 //
-// Target: ~/.config/noctalia/plugins/web-search/settings.json
-// Idempotent: rebuilds `engines`, `bookmarks`, `shortcuts` from the sources on
-// every run and preserves all other settings keys.
+// Target: <data-dir>/settings.json (default ~/.config/noctalia/plugins/web-search)
+// Idempotent and non-destructive: bookmark/engine/shortcut entries already in
+// settings.json win over imported ones, and all other settings keys are kept.
+//
+// Data dir: --data-dir DIR | --data-dir=DIR | $WEB_SEARCH_DATA_DIR
 
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { execFileSync } = require("child_process");
+const { resolveDataDir, zenProfile, bookmarks: zenBookmarks } = require("./import-history.js");
 
 const HOME = os.homedir();
 const WW = path.join(HOME, ".config/ww");
-const PLUGIN = path.join(HOME, ".config/noctalia/plugins/web-search");
-const ZEN_PROFILE = path.join(HOME, ".zen/eeujjh69.Default Profile");
-const ZEN_DB = path.join(ZEN_PROFILE, "places.sqlite");
+const DATA_DIR = resolveDataDir(process.argv.slice(2), process.env, HOME);
+const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 
 const ENGINE_NAME_TO_KEY = {
   Google: "g",
@@ -43,42 +44,32 @@ function httpUrl(value) {
   return typeof value === "string" && /^https?:\/\//i.test(value.trim());
 }
 
-function zenBookmarks() {
-  if (!fs.existsSync(ZEN_DB)) return [];
-  try {
-    const out = execFileSync(
-      "sqlite3",
-      [
-        "-json",
-        `file:${ZEN_DB}?immutable=1`,
-        `SELECT p.url AS url, COALESCE(NULLIF(p.title,''), p.url) AS title, p.visit_count AS visits
-         FROM moz_bookmarks b JOIN moz_places p ON b.fk = p.id
-         WHERE b.type = 1 AND p.hidden = 0
-         ORDER BY p.visit_count DESC`,
-      ],
-      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 }
-    ).trim();
-    return out ? JSON.parse(out) : [];
-  } catch (err) {
-    console.error("zenBookmarks:", err.message);
-    return [];
-  }
+function loadZenBookmarks() {
+  const profile = zenProfile(HOME);
+  if (!profile) return [];
+  return zenBookmarks(path.join(profile, "places.sqlite")) || [];
 }
 
-function mergeBookmarks(entries) {
+// Existing entries are passed first, so their non-empty title wins; visits are
+// the max seen anywhere.
+function mergeBookmarks(existing, incoming) {
   const byUrl = new Map();
-  for (const e of entries) {
+  for (const e of [...existing, ...incoming]) {
     if (!e || !httpUrl(e.url)) continue;
     const url = e.url.trim();
+    const title = typeof e.title === "string" ? e.title.trim() : "";
+    const visits = Number(e.visits) || 0;
     const prev = byUrl.get(url);
-    const next = {
-      title: (e.title || "").trim() || url,
-      url,
-      visits: Number(e.visits) || 0,
-    };
-    if (!prev || next.visits > prev.visits) byUrl.set(url, next);
+    if (!prev) {
+      byUrl.set(url, { title, url, visits });
+    } else {
+      prev.visits = Math.max(prev.visits, visits);
+      if (!prev.title) prev.title = title;
+    }
   }
-  return [...byUrl.values()].sort((a, b) => b.visits - a.visits || a.title.localeCompare(b.title));
+  return [...byUrl.values()]
+    .map((b) => ({ title: b.title || b.url, url: b.url, visits: b.visits }))
+    .sort((a, b) => b.visits - a.visits || a.title.localeCompare(b.title));
 }
 
 function loadShortcuts() {
@@ -99,34 +90,59 @@ function loadEngines() {
   const src = readJson(path.join(WW, "engines.json"), {});
   const out = [];
   for (const [key, eng] of Object.entries(src)) {
-    if (!eng || !key) continue;
+    if (!eng || !key || !eng.url) continue;
     out.push({
       key,
       name: eng.name || key,
-      url: eng.url || "",
+      url: eng.url,
       domain: eng.domain || "",
     });
   }
   return out;
 }
 
+// Imported entries fill gaps; existing valid entries with the same key/alias win.
+function mergeBy(existing, imported, key) {
+  const merged = new Map();
+  for (const entry of imported) {
+    if (entry && entry[key] && entry.url) merged.set(entry[key], entry);
+  }
+  for (const entry of existing) {
+    if (entry && entry[key] && entry.url) merged.set(entry[key], entry);
+  }
+  return [...merged.values()];
+}
+
 function main() {
-  const settingsFile = path.join(PLUGIN, "settings.json");
-  const settings = readJson(settingsFile, {});
+  const settings = readJson(SETTINGS_FILE, {});
+  const wwBookmarks = readJson(path.join(WW, "bookmarks.json"), []);
+
+  settings.bookmarks = mergeBookmarks(
+    Array.isArray(settings.bookmarks) ? settings.bookmarks : [],
+    [...wwBookmarks, ...loadZenBookmarks()]
+  );
+  settings.shortcuts = mergeBy(
+    Array.isArray(settings.shortcuts) ? settings.shortcuts : [],
+    loadShortcuts(),
+    "alias"
+  );
+  settings.engines = mergeBy(
+    Array.isArray(settings.engines) ? settings.engines : [],
+    loadEngines(),
+    "key"
+  );
 
   const engineName = settings.search_engine;
   if (ENGINE_NAME_TO_KEY[engineName]) settings.search_engine = ENGINE_NAME_TO_KEY[engineName];
   else if (!engineName) settings.search_engine = "ddg";
 
-  const wwBookmarks = readJson(path.join(WW, "bookmarks.json"), []);
-  settings.bookmarks = mergeBookmarks([...wwBookmarks, ...zenBookmarks()]);
-  settings.shortcuts = loadShortcuts();
-  settings.engines = loadEngines();
-
-  fs.mkdirSync(PLUGIN, { recursive: true });
-  fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + "\n");
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  // Atomic write: the plugin may read this file concurrently.
+  const tmp = `${SETTINGS_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n");
+  fs.renameSync(tmp, SETTINGS_FILE);
   console.log(
-    `migrated -> ${settingsFile}\n` +
+    `migrated -> ${SETTINGS_FILE}\n` +
       `  engines:   ${settings.engines.length}\n` +
       `  bookmarks: ${settings.bookmarks.length}\n` +
       `  shortcuts: ${settings.shortcuts.length}\n` +
@@ -134,4 +150,11 @@ function main() {
   );
 }
 
-main();
+if (require.main === module) {
+  try {
+    main();
+  } catch (err) {
+    console.error("migrate: failed: " + (err && err.message ? err.message : err));
+    process.exitCode = 1;
+  }
+}
