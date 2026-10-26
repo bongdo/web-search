@@ -91,7 +91,7 @@ function query(db, sql) {
   if (!fs.existsSync(db)) return [];
   const run = (file, quiet) => {
     const uri = pathToFileURL(file).href + "?mode=ro&busy_timeout=2000";
-    const opts = { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 };
+    const opts = { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, timeout: 15000, killSignal: "SIGTERM" };
     if (quiet) opts.stdio = ["ignore", "pipe", "ignore"];
     const out = execFileSync("sqlite3", ["-json", uri, sql], opts).trim();
     return out ? JSON.parse(out) : [];
