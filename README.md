@@ -76,9 +76,11 @@ With an empty query, `h `, `b ` and `sh ` list up to 50 entries: history newest 
 
 The plugin imports Zen data automatically. On each launcher open, `tools/import-history.js` incrementally imports new page visits from Zen's `places.sqlite`, refreshes the Zen bookmark list, and converts search terms from `formhistory.sqlite` into search URLs for your configured engine, so selecting one re-runs the search. The result is written to `history.json` in the plugin directory.
 
-Imported entries are merged with the history the launcher records itself and with the bookmarks stored in the plugin settings. History is deduplicated by URL keeping the newest visit; bookmarks keep the settings title and the higher visit count. The two writers never touch the same file: the import tool owns `history.json`, and only the plugin writes `settings.json`.
+Bookmarks also have a direct path: on every launcher open the plugin queries the newest `places.sqlite` with `sqlite3` itself. This keeps bookmarks working when `node` is missing or the import tool fails, and a bookmark added in Zen shows up the next time the launcher opens even if `history.json` is stale.
 
-The sync needs `node` and `sqlite3`. `node` is auto-probed in common local and NixOS locations, then `PATH`; `sqlite3` must be on `PATH`. Errors are reported in the Noctalia/quickshell log.
+Imported entries are merged with the history the launcher records itself and with the bookmarks stored in the plugin settings. History is deduplicated by URL keeping the newest visit; bookmarks are deduplicated by URL, taking the browser title and the highest visit count. The two writers never touch the same file: the import tool owns `history.json`, and only the plugin writes `settings.json`.
+
+The history sync needs `node`; both paths need `sqlite3` on `PATH`. `node` is auto-probed in common local and NixOS locations, then `PATH`. Errors are reported in the Noctalia/quickshell log.
 
 ## IPC Commands
 

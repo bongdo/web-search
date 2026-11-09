@@ -31,6 +31,11 @@ Item {
     property var importedHistory: []
     property var history: []
     property bool syncingHistory: false
+    // Live Zen bookmarks, read straight from places.sqlite. Kept separate
+    // from the tool-owned history.json import so a broken/absent Node sync
+    // never hides a bookmark the user just added.
+    property var browserBookmarks: []
+    property bool browserSyncing: false
     property string defaultEngineKey: "ddg"
     property bool directUrl: true
     property bool showSuggestions: true
@@ -84,6 +89,7 @@ Item {
         }
         // Show the last import immediately, then top it up with a fresh diff.
         refreshImportedHistory();
+        refreshBrowserBookmarks();
         startHistorySync();
     }
 
@@ -124,7 +130,7 @@ Item {
     // are the max from either source.
     function rebuildBookmarks() {
         var byUrl = ({});
-        var lists = [importedBookmarks, selfBookmarks];
+        var lists = [importedBookmarks, selfBookmarks, browserBookmarks];
         for (var i = 0; i < lists.length; i++) {
             for (var j = 0; j < lists[i].length; j++) {
                 var e = lists[i][j];
@@ -189,9 +195,14 @@ Item {
     }
 
     function refreshImportedHistory() {
-        if (importedHistoryFile.path) {
-            importedHistoryFile.reload();
+        // Read with a Process instead of FileView: the import tool writes
+        // history.json with tmp+rename, and FileView keeps watching the old
+        // inode after that. A fresh cat always sees the current file.
+        if (!pluginApi || historyFile() === "") {
+            return;
         }
+        importedReader.command = ["cat", historyFile()];
+        importedReader.running = true;
     }
 
     function shellQuote(s) {
@@ -200,8 +211,41 @@ Item {
 
     // The tool is incremental, so a diff is cheap enough to run on every open.
     // node is not on the shell's PATH; probe the usual spots, then PATH.
+    function refreshBrowserBookmarks() {
+        if (!pluginApi || browserSyncing) {
+            return;
+        }
+        browserSyncing = true;
+        browserBookmarksProcess.running = true;
+    }
+
+    // Newest Zen/Firefox places.sqlite, then one row per bookmarked URL. The
+    // same DB is used by the Node history importer, but bookmarks must not
+    // depend on node being present in the shell's PATH.
+    function browserBookmarkCommand() {
+        var sql = "SELECT (SELECT b.title FROM moz_bookmarks b "
+            + "WHERE b.fk = p.id AND b.type = 1 AND b.title IS NOT NULL AND trim(b.title) <> '' "
+            + "ORDER BY b.dateAdded DESC LIMIT 1) AS title, "
+            + "p.url AS url, p.visit_count AS visits "
+            + "FROM moz_places p "
+            + "WHERE p.url LIKE 'http%' "
+            + "AND EXISTS (SELECT 1 FROM moz_bookmarks b WHERE b.fk = p.id AND b.type = 1) "
+            + "ORDER BY p.visit_count DESC";
+        return "db=$(find \"$HOME/.zen\" \"$HOME/.mozilla/firefox\" -maxdepth 2 -name places.sqlite -printf '%T@ %p\\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2-); "
+            + "[ -n \"$db\" ] || exit 3; "
+            + "sqlite3 -json -readonly \"file:$db?immutable=1\" " + shellQuote(sql);
+    }
+
     function startHistorySync() {
-        if (!pluginApi || syncingHistory) {
+        if (!pluginApi) {
+            return;
+        }
+        // A Process that never emits exited (for example an empty command at
+        // init time) would otherwise leave the flag set forever.
+        if (syncingHistory && !historySync.running) {
+            syncingHistory = false;
+        }
+        if (syncingHistory) {
             return;
         }
         syncingHistory = true;
@@ -581,16 +625,87 @@ Item {
         onExited: root.seedFaviconCache(String(faviconListStdout.text || ""))
     }
 
-    // Watches the tool-owned Zen import (history.json) and merges it in.
-    // FileView reloads on change, so there is no reader process or running flag.
-    FileView {
-        id: importedHistoryFile
-        path: root.historyFile()
-        watchChanges: true
-        printErrors: false
-        onLoaded: root.applyImportedData(text())
-        onFileChanged: reload()
-        onLoadFailed: (error) => Logger.w("WebSearch", "Could not read " + root.historyFile() + " (" + error + ")")
+    // Reads the tool-owned Zen import (history.json) and merges it in.
+    // This is a Process, not FileView: the importer replaces the file with an
+    // atomic rename, so a watcher on the old inode would go stale.
+    Process {
+        id: importedReader
+        command: ["cat", root.historyFile()]
+        stdout: StdioCollector {
+            id: importedReaderStdout
+        }
+        onExited: (code) => {
+            if (code !== 0) {
+                Logger.w("WebSearch", "Could not read " + root.historyFile() + " (cat exit " + code + ")");
+                return;
+            }
+            root.applyImportedData(String(importedReaderStdout.text || ""));
+        }
+    }
+
+    // Reads browser bookmarks directly. One sqlite3 query per launcher open;
+    // the result is merged ahead of the stale history.json/self lists.
+    Process {
+        id: browserBookmarksProcess
+        command: ["sh", "-c", root.browserBookmarkCommand()]
+        stdout: StdioCollector {
+            id: browserBookmarksStdout
+        }
+        stderr: StdioCollector {
+            id: browserBookmarksStderr
+        }
+        onExited: (code) => {
+            root.browserSyncing = false;
+            if (code !== 0) {
+                Logger.w("WebSearch", "Browser bookmark import failed (exit " + code + "): " + String(browserBookmarksStderr.text || ""));
+                return;
+            }
+            var rows = [];
+            var text = String(browserBookmarksStdout.text || "").replace(/^\s+|\s+$/g, "");
+            if (text !== "") {
+                try {
+                    rows = JSON.parse(text);
+                } catch (e) {
+                    Logger.w("WebSearch", "Browser bookmark JSON parse error: " + e);
+                    return;
+                }
+            }
+            if (!Array.isArray(rows)) {
+                return;
+            }
+            var byUrl = ({});
+            for (var i = 0; i < rows.length; i++) {
+                var row = rows[i];
+                if (!row || typeof row.url !== "string") {
+                    continue;
+                }
+                var url = row.url.replace(/^\s+|\s+$/g, "");
+                if (!/^https?:\/\//i.test(url)) {
+                    continue;
+                }
+                var title = typeof row.title === "string" ? row.title.replace(/^\s+|\s+$/g, "") : "";
+                var visits = Number(row.visits) || 0;
+                var prev = byUrl[url];
+                if (!prev) {
+                    byUrl[url] = { "title": title, "url": url, "visits": visits };
+                    continue;
+                }
+                var prevVisits = prev.visits || 0;
+                if (title && (prev.title === url || visits > prevVisits)) {
+                    prev.title = title;
+                }
+                prev.visits = Math.max(prevVisits, visits);
+            }
+            var out = [];
+            for (var key in byUrl) {
+                out.push(byUrl[key]);
+            }
+            root.browserBookmarks = out;
+            root.rebuildBookmarks();
+            if (root.launcher) {
+                root.launcher.updateResults();
+            }
+        }
     }
 
     // Runs the incremental import tool; on exit the fresh history.json is read.
