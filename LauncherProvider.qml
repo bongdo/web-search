@@ -23,7 +23,11 @@ Item {
     property var bookmarks: []
     property var selfBookmarks: []
     property var importedBookmarks: []
+    // `shortcuts` is the merged view: plugin settings plus the live
+    // ~/.config/ww/shortcuts.json and ~/.bookmarks sources.
     property var shortcuts: []
+    property var selfShortcuts: []
+    property var externalShortcuts: []
     // `history` is the merged view used by search: pages the launcher recorded
     // (selfHistory, in settings.json) plus the Zen import (importedHistory,
     // from the tool-owned history.json).
@@ -72,7 +76,8 @@ Item {
         engines = Lib.allEngines(cfgValue("engines", []));
         selfBookmarks = cfgValue("bookmarks", []);
         rebuildBookmarks();
-        shortcuts = cfgValue("shortcuts", []);
+        selfShortcuts = cfgValue("shortcuts", []);
+        rebuildShortcuts();
         selfHistory = cfgValue("history", []);
         rebuildHistory();
         defaultEngineKey = cfgValue("search_engine", "ddg");
@@ -90,7 +95,9 @@ Item {
         // Show the last import immediately, then top it up with a fresh diff.
         refreshImportedHistory();
         refreshBrowserBookmarks();
+        refreshExternalShortcuts();
         startHistorySync();
+        externalRefresh.restart();
     }
 
     function historyFile() {
@@ -99,6 +106,16 @@ Item {
 
     function historyScript() {
         return pluginApi ? pluginApi.pluginDir + "/tools/import-history.js" : "";
+    }
+
+    // Live shortcut sources override the copy migrated into plugin settings,
+    // so adding/editing a shortcut in ww or ~/.bookmarks needs no migration.
+    function rebuildShortcuts() {
+        shortcuts = Lib.mergeShortcuts([selfShortcuts, externalShortcuts]);
+    }
+
+    function refreshExternalShortcuts() {
+        externalShortcutsReader.running = true;
     }
 
     // Merge self-recorded and imported history into one newest-first list.
@@ -643,6 +660,46 @@ Item {
         }
     }
 
+    // Reads the two live shortcut sources on every open. They are the same
+    // files the zsh web helper and clilauncher use, so a shortcut added there
+    // shows up here without running tools/migrate.js.
+    Process {
+        id: externalShortcutsReader
+        command: ["sh", "-c", "echo '@@BOOKMARKS@@'; cat \"$HOME/.bookmarks\" 2>/dev/null; echo '@@WW@@'; cat \"${XDG_CONFIG_HOME:-$HOME/.config}/ww/shortcuts.json\" 2>/dev/null; true"]
+        stdout: StdioCollector {
+            id: externalShortcutsStdout
+        }
+        onExited: (code) => {
+            if (code !== 0) {
+                Logger.w("WebSearch", "Shortcut sync failed (exit " + code + ")");
+                return;
+            }
+            var text = String(externalShortcutsStdout.text || "");
+            var bookmarksAt = text.indexOf("@@BOOKMARKS@@");
+            var wwAt = text.indexOf("@@WW@@");
+            var bookmarksText = bookmarksAt >= 0 ? text.slice(bookmarksAt + 13, wwAt >= 0 ? wwAt : text.length) : "";
+            var wwText = wwAt >= 0 ? text.slice(wwAt + 6) : "";
+            var wwItems = [];
+            if (wwText.replace(/^\s+|\s+$/g, "") !== "") {
+                try {
+                    var parsed = JSON.parse(wwText);
+                    if (Array.isArray(parsed)) {
+                        wwItems = parsed;
+                    }
+                } catch (e) {
+                    Logger.w("WebSearch", "ww shortcuts JSON parse error: " + e);
+                }
+            }
+            // ~/.bookmarks wins over ww on the same alias, matching clilauncher.
+            root.externalShortcuts = Lib.mergeShortcuts([wwItems, Lib.parseBookmarksFile(bookmarksText)]);
+            root.rebuildShortcuts();
+            Logger.d("WebSearch", "External shortcuts: " + root.externalShortcuts.length);
+            if (root.launcher) {
+                root.launcher.updateResults();
+            }
+        }
+    }
+
     // Reads browser bookmarks directly. One sqlite3 query per launcher open;
     // the result is merged ahead of the stale history.json/self lists.
     Process {
@@ -746,6 +803,18 @@ Item {
                 root.syncingHistory = false;
                 historySync.running = false;
             }
+        }
+    }
+
+    // The importer is incremental, so a periodic run is cheap. This keeps the
+    // visited-pages list fresh even when the launcher stays open all day.
+    Timer {
+        id: externalRefresh
+        interval: 300000
+        repeat: true
+        onTriggered: {
+            root.refreshExternalShortcuts();
+            root.startHistorySync();
         }
     }
 

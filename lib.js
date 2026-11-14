@@ -465,6 +465,64 @@ function getResults(opts) {
     return out;
 }
 
+// Legacy ~/.bookmarks format: one "alias:url" per line (see the zsh b()
+// helper). URLs contain colons, so split only on the first one.
+function parseBookmarksFile(text) {
+    var out = [];
+    var lines = String(text || "").split(/\r?\n/);
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].replace(/^\s+|\s+$/g, "");
+        if (line === "" || line.charAt(0) === "#") {
+            continue;
+        }
+        var sep = line.indexOf(":");
+        if (sep <= 0) {
+            continue;
+        }
+        var alias = line.slice(0, sep).replace(/^\s+|\s+$/g, "");
+        var url = line.slice(sep + 1).replace(/^\s+|\s+$/g, "");
+        if (alias !== "" && /^https?:\/\//i.test(url)) {
+            out.push({ alias: alias, name: alias, url: url });
+        }
+    }
+    return out;
+}
+
+// Merge shortcut sources by alias (case-insensitive). Later lists win, so the
+// live ww/.bookmarks sources can update shortcuts that were migrated into
+// plugin settings without a one-off migration pass.
+function mergeShortcuts(lists) {
+    var byAlias = {};
+    for (var i = 0; i < lists.length; i++) {
+        var list = lists[i] || [];
+        for (var j = 0; j < list.length; j++) {
+            var item = list[j];
+            if (!item || typeof item.alias !== "string" || typeof item.url !== "string") {
+                continue;
+            }
+            var alias = item.alias.replace(/^\s+|\s+$/g, "");
+            var url = item.url.replace(/^\s+|\s+$/g, "");
+            if (alias === "" || url === "") {
+                continue;
+            }
+            var name = typeof item.name === "string" ? item.name.replace(/^\s+|\s+$/g, "") : "";
+            byAlias[alias.toLowerCase()] = {
+                alias: alias,
+                name: name || alias,
+                url: url
+            };
+        }
+    }
+    var out = [];
+    for (var key in byAlias) {
+        out.push(byAlias[key]);
+    }
+    out.sort(function (a, b) {
+        return a.alias.toLowerCase().localeCompare(b.alias.toLowerCase());
+    });
+    return out;
+}
+
 if (typeof module !== "undefined" && module.exports) {
     module.exports = {
         BUILTIN_ENGINES: BUILTIN_ENGINES,
@@ -480,6 +538,8 @@ if (typeof module !== "undefined" && module.exports) {
         isUrl: isUrl,
         normalizeUrl: normalizeUrl,
         parseSuggestions: parseSuggestions,
+        parseBookmarksFile: parseBookmarksFile,
+        mergeShortcuts: mergeShortcuts,
         getResults: getResults
     };
 }

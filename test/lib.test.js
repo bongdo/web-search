@@ -235,4 +235,28 @@ check("bookmark with a non-URL falls through to a normal query", () => {
   assert.ok(r.some((x) => x.kind === "search"));
 });
 
+check("parseBookmarksFile reads alias:url lines", () => {
+  const items = L.parseBookmarksFile(
+    "# comment\n\nma:https://market.yandex.ru/\noracle:https://cloud.oracle.com/\nbad-line\n:https://empty-alias.example\nnot-a-url:example.com\n"
+  );
+  assert.deepStrictEqual(items, [
+    { alias: "ma", name: "ma", url: "https://market.yandex.ru/" },
+    { alias: "oracle", name: "oracle", url: "https://cloud.oracle.com/" }
+  ]);
+});
+
+check("mergeShortcuts dedupes by alias and lets live sources win", () => {
+  const merged = L.mergeShortcuts([
+    [{ alias: "ma", name: "Old market", url: "https://old.example" }],
+    [
+      { alias: "MA", name: "Yandex Market", url: "https://market.yandex.ru/" },
+      { alias: "oracle", url: "https://cloud.oracle.com/" }
+    ]
+  ]);
+  assert.deepStrictEqual(merged, [
+    { alias: "MA", name: "Yandex Market", url: "https://market.yandex.ru/" },
+    { alias: "oracle", name: "oracle", url: "https://cloud.oracle.com/" }
+  ]);
+});
+
 console.log("\n" + passed + " checks passed" + (process.exitCode ? ", some failed" : ""));

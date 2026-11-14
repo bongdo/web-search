@@ -66,6 +66,10 @@ These modifiers only look at your own data; they never add a web-search row.
 
 With an empty query, `h `, `b ` and `sh ` list up to 50 entries: history newest first, bookmarks by visit count, shortcuts by name. An engine modifier also restricts your history, bookmarks and shortcuts to that engine's domains, so `y cats` only matches your YouTube entries.
 
+Shortcuts are read live on every launcher open from the same files the zsh `web` helper and clilauncher use: `~/.bookmarks` (`alias:url` per line) and `~/.config/ww/shortcuts.json`. They are merged with the shortcuts stored in the plugin settings; the live file wins when both define the same alias. Adding a shortcut with `b -add` or in clilauncher therefore needs no migration step. Periodic refresh (every five minutes) keeps both shortcuts and imported history current while the shell runs.
+
+The plugin's own Settings page still manages the copy in `settings.json`. A shortcut deleted from the live files but still present in that copy stays visible until it is removed there.
+
 **Add a bookmark:**
 ```
 >web bookmark https://example.com
@@ -117,6 +121,11 @@ The settings page also manages:
 - For Zen sync: `node` and `sqlite3` (see above)
 
 ## Changelog
+
+### 2.3.1
+- Shortcuts are synced live from `~/.bookmarks` and `~/.config/ww/shortcuts.json` on every launcher open
+- Shortcuts and Zen history are refreshed every five minutes while the shell runs
+- `migrate.js` is no longer required for new or edited shortcuts
 
 ### 2.3.0
 - Added `h `, `b ` and `sh ` modifiers for history, bookmarks and shortcuts
